@@ -1,0 +1,10 @@
+{
+  "lock": ".autopilot/run.lock",
+  "build_lock": "",
+  "app_process": "<the app's process name, as `pgrep -x` sees it; empty if none>",
+  "worker_model": "Worker (Opus 5.5)",
+  "pinned_tail": [
+    999
+  ],
+  "brief": "tools/prompts/worker.md"
+}

@@ -1,0 +1,5 @@
+#!/bin/bash
+# The worker status table, printed by the worker skill's queue tool (no model tokens): run it as `! wts` in Claude Code.
+root="$PWD"; while [ "$root" != "/" ] && [ ! -f "$root/.autopilot/worker/queue.md" ]; do root=$(dirname "$root"); done
+[ -f "$root/.autopilot/worker/queue.md" ] || { echo "no .autopilot/worker/queue.md above $PWD"; exit 1; }
+exec python3 ~/.claude/skills/worker/scripts/queue.py --root "$root" wts --term "$@"
