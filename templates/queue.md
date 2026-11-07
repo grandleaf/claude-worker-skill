@@ -19,7 +19,9 @@ before END). push: HP worker idle, at the top; busy, just after the task in prog
 push override (HP): the task in progress is paused at its next clean point and the new task starts at once; the
 paused task resumes right after it.
 
-**Caffeinate:** queuing any task starts `caffeinate -dims` if it is off; task 999 (END) stops it.
+**Caffeinate (macOS only):** queuing any task starts `caffeinate -dims` if it is off; task 999 (END) stops it.
+Where the command does not exist -- Linux, or a server that never sleeps -- there is nothing to keep awake and this
+line does not apply.
 **Model:** every task runs on the worker's model unless the user explicitly puts a task on another model.
 
 | # | Pri | Task | State | Accepted |

@@ -46,6 +46,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import time
 import subprocess
 import sys
@@ -316,6 +317,16 @@ def runs_on(q, r):
 
 
 def caffeinated():
+    """True or False while a keep-awake can exist, None where it cannot.
+
+    `caffeinate` is macOS-only.  On a machine without it -- Linux, or any
+    server that does not sleep -- there is nothing to keep awake, and printing
+    "caffeinate off" would be a status report about a feature that is not
+    there.  None means "not applicable" and the callers leave the segment out,
+    which is what `statusline.sh` already does with `command -v`.
+    """
+    if not shutil.which("caffeinate"):
+        return None
     try:
         return subprocess.run(["pgrep", "-f", "^caffeinate -dims"], capture_output=True).returncode == 0
     except OSError:
@@ -511,7 +522,9 @@ def main():
     elif args.cmd == "wts":
         rows = [r for r in q.rows()]
         pinned = q.pinned()
-        print(q.window() + f" · caffeinate {'on' if caffeinated() else 'off'}")
+        caf = caffeinated()
+        print(q.window() + ("" if caf is None
+                            else f" · caffeinate {'on' if caf else 'off'}"))
         print()
         b = "" if args.term else "**"
         only = args.only or list(PRIS)
@@ -524,7 +537,9 @@ def main():
         for r in rows:
             if r["n"] in pinned and not args.only:
                 print()
-                print(f"{r['n']} END: when all three tables are empty, \"queue empty\", then the lead stops caffeinate.")
+                tail = (" then the lead stops caffeinate."
+                        if caffeinated() is not None else "")
+                print(f"{r['n']} END: when all three tables are empty, \"queue empty\".{tail}")
 
 
 def print_order(q):

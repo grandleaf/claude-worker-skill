@@ -144,8 +144,10 @@ it will be checked and what picture sheet to make. One row, one outcome. A follo
 not a new task. When a new note supersedes an open task, fold the old one in (`Q state N --text "folded into M"` and
 set its Accepted to `n/a (folded into M)`).
 
-**Queuing any task starts `caffeinate -dims`** (macOS) in the background if it is not running; when the worker
-reports "queue empty", stop it. **The model rule:** every task runs on the worker's model unless the user explicitly
+**Keeping the machine awake.** On macOS, queuing any task starts `caffeinate -dims` in the background if it is
+not running, and you stop it when the worker reports "queue empty". **Where there is no `caffeinate` -- Linux, or any
+server that does not sleep -- skip this entirely**: do not look for a substitute, and do not mention it in the status
+table. `queue.py` already omits the segment when the command is absent, so the two agree. **The model rule:** every task runs on the worker's model unless the user explicitly
 puts a task on another model; such a task gets its own fresh agent on that model, started by you, and its row says
 "Runs as a fresh agent on the <Model> model".
 
@@ -177,7 +179,7 @@ as `Q wts`, its tables boxed with ┌┬┐ lines). Never fold rows into prose; 
 | 77 | Port the renderer to the new API | Opus 5.5 | ⏩ in progress · waits for the window | — |
 | 52 | Rewrite the import pipeline | Fable 5.1 | ✅ done 07:37 | — |
 
-999 END: when all three tables are empty, "queue empty", then the lead stops caffeinate.
+999 END: when all three tables are empty, "queue empty", then the lead stops caffeinate (macOS only).
 ```
 
 **How a row reads.** The sign comes from the first words of the State cell:
