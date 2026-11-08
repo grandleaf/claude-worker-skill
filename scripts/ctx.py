@@ -8,7 +8,7 @@ has agents, unless --session names one) and prints, newest first, each agent's i
 last step (input + cache read + cache write), and when that step was. Without --all, agents idle for more than a day
 are left out.
 
-The rule it serves: a fresh worker per task, a fresh agent per unit for MP and LP. A redo may go
+The rule it serves (the user, 2026-10-22): a fresh worker per task, a fresh agent per unit for MP and LP. A redo may go
 back to the same agent only while its context is small (under about 300k); past that, a fresh agent from the notes.
 """
 import argparse, glob, json, os, sys

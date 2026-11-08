@@ -42,21 +42,33 @@ if pct is None:
             pct = round(100 * cur / size)
     except Exception:
         pct = None
+# The weekly usage (the user, 2026-11-05: "show the claude weekly usage in the status bar, after the ctx"):
+# rate_limits.seven_day.used_percentage and its reset time, as Claude Code passes them.
+wk = wkr = ""
+try:
+    sd = (d.get("rate_limits") or {}).get("seven_day") or {}
+    if sd.get("used_percentage") is not None:
+        wk = str(int(round(sd["used_percentage"])))
+        if sd.get("resets_at"):
+            import time
+            wkr = time.strftime("%a %H:%M", time.localtime(int(sd["resets_at"])))
+except Exception:
+    pass
 cfg = {}
 try:
     with open(os.path.join(c, ".autopilot", "worker", "config.json")) as f:
         cfg = json.load(f)
 except Exception:
     pass
-print("MODEL=%s CWD=%s PCT=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % (
-    shlex.quote(m), shlex.quote(c), shlex.quote("" if pct is None else str(int(pct))),
-    shlex.quote(cfg.get("lock", ".autopilot/run.lock")), shlex.quote(cfg.get("app_process", "")),
+print("MODEL=%s CWD=%s PCT=%s WK=%s WKR=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % (
+    shlex.quote(m), shlex.quote(c), shlex.quote("" if pct is None else str(int(pct))), shlex.quote(wk), shlex.quote(wkr),
+    shlex.quote(" ".join(cfg.get("locks") or [cfg.get("lock", ".autopilot/run.lock")])), shlex.quote(cfg.get("app_process", "")),
     shlex.quote(cfg.get("build_lock", ""))))
 EOF
 )"
 CWD=${CWD:-$PWD}
 # CWD is the project root: the python above takes workspace.project_dir, or the nearest folder upward with
-# .autopilot/worker (the session's folder can move into subfolders, which would hide the window part).
+# .autopilot/worker (2026-10-25: the session's folder moves into subfolders, which used to hide the window part).
 # No comments inside that heredoc: bash 3.2 misparses them inside $( ).
 # held <dir>: how long a lock has been held, from the folder's own time (made when it was taken): "45s", "7m", "1h05m"
 held() {
@@ -69,21 +81,30 @@ held() {
 }
 parts=("${MODEL:-Claude}")
 if [ -d "$CWD/.autopilot/worker" ]; then
-  lock="$CWD/${LOCK_REL:-.autopilot/run.lock}"
-  if [ -d "$lock" ]; then
-    who=$(cat "$lock/who" 2>/dev/null || echo "lead")
-    set -- $who; tm=$(echo "$who" | grep -oE '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?' | head -1)
-    hd=$(held "$lock")
-    win="🔴 window: ${1:-lead}${2:+ $2}${tm:+ since $tm}${hd:+ ($hd)}"
-  elif [ -f "$lock" ]; then
-    txt=$(cat "$lock"); set -- $txt; tm=$(echo "$txt" | grep -oE '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?' | head -1)
-    hd=$(held "$lock")
-    win="🔴 window: ${1:-held}${2:+ $2}${tm:+ since $tm}${hd:+ ($hd)}"
-  else
-    win="🟢 window free"
-  fi
-  [ -n "$APP_PROC" ] && pgrep -x "$APP_PROC" >/dev/null 2>&1 && win="$win · app open"
-  parts+=("$win")
+  # LOCK_REL: one lock, or several window slots separated by spaces (config "locks"). The user, 2026-10-29: "dont do
+  # combine status for the windows in the status bar. allocate two permanent slots for them": one part per slot, always
+  # shown in the same place: "🔴 win0: hp202 capture since 22:50 (12s)" · "🟢 win1 free".
+  nl=0; set -- ${LOCK_REL:-.autopilot/run.lock}; nslots=$#
+  for rel in ${LOCK_REL:-.autopilot/run.lock}; do
+    nl=$(( nl + 1 )); lock="$CWD/$rel"; one=""
+    if [ -d "$lock" ]; then
+      who=$(cat "$lock/who" 2>/dev/null || echo "lead")
+      set -- $who; tm=$(echo "$who" | grep -oE '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?' | head -1)
+      hd=$(held "$lock"); one="${1:-lead}${2:+ $2}${tm:+ since $tm}${hd:+ ($hd)}"
+    elif [ -f "$lock" ]; then
+      txt=$(cat "$lock"); set -- $txt; tm=$(echo "$txt" | grep -oE '[0-9]{1,2}:[0-9]{2}(:[0-9]{2})?' | head -1)
+      hd=$(held "$lock"); one="${1:-held}${2:+ $2}${tm:+ since $tm}${hd:+ ($hd)}"
+    fi
+    # 0-based (the user, 2026-10-29: "make the win index start from 0 ... win0, and win1"); a window the user reserved
+    # for shows (a file <lock>.reserved) shows 🔒: "🔒 win1 reserved", "🔴 win1🔒: lead show since 23:30 (2m)".
+    if [ "$nslots" -le 1 ]; then name="window"; else name="win$(( nl - 1 ))"; fi
+    rs=""; [ -f "$lock.reserved" ] && rs="🔒"
+    if [ -n "$one" ]; then parts+=("🔴 $name$rs: $one")
+    elif [ -n "$rs" ]; then parts+=("🔒 $name reserved")
+    else parts+=("🟢 $name free"); fi
+  done
+  # A pending "reserve whichever frees first" (<locks' folder>/winres.any, e.g. a tools/winres.sh reserve any)
+  set -- ${LOCK_REL:-.autopilot/run.lock}; [ -f "$CWD/$(dirname "$1")/winres.any" ] && parts+=("🔒 next free win → reserved")
   # A build beside the app (config "build_lock") holds its own lock, not the window: "🔨 build: hp182 since 21:40"
   if [ -n "$BUILD_LOCK_REL" ] && [ -d "$CWD/$BUILD_LOCK_REL" ]; then
     bw=$(cat "$CWD/$BUILD_LOCK_REL/who" 2>/dev/null || echo "someone")
@@ -98,7 +119,16 @@ if [ -d "$CWD/.autopilot/worker" ]; then
     parts+=("${hplp#*$'\t'}")
   fi
 fi
-if pgrep -f "^caffeinate -dims" >/dev/null 2>&1; then parts+=("☕ on"); elif command -v caffeinate >/dev/null 2>&1; then parts+=("☕ off"); fi
+# A safety net (the user, 2026-11-05): caffeinate should run only while an agent works. With it on and no queue row
+# "in progress"/"in hand" in any table, say so: "☕ on · nothing working" (the lead missed turning it off).
+if pgrep -f "^caffeinate -dims" >/dev/null 2>&1; then
+  busy=1
+  if [ -f "$CWD/.autopilot/worker/queue.md" ]; then
+    busy=$(awk -F'|' '$2 ~ /^ *[0-9]+ *$/ && $5 ~ /^ *(in progress|in hand)/ {n++} END{print n+0}' "$CWD/.autopilot/worker/queue.md" 2>/dev/null)
+  fi
+  if [ "${busy:-1}" = "0" ]; then parts+=("☕ on · nothing working"); else parts+=("☕ on"); fi
+elif command -v caffeinate >/dev/null 2>&1; then parts+=("☕ off"); fi
 [ -n "$PCT" ] && parts+=("ctx ${PCT}%")
+[ -n "$WK" ] && parts+=("week ${WK}%")
 out=""; for p in "${parts[@]}"; do out="${out:+$out · }$p"; done
 printf '%s' "$out"

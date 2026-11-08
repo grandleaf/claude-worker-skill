@@ -11,6 +11,8 @@ reviews what comes back, and shows you the result. You keep working with the lea
 - **One shared window:** builds, captures and app runs take a lock, so the agents and your own showings never collide.
   The lock is held only while the app is open, so a showing gets in between a worker's runs.
 - **A fresh agent per task**, so contexts stay small; the task's notes file is the hand-off for a redo.
+- **Limits per Claude session:** `queue.py limit hp 2 mp 1` sets how many agents this session runs at once; the
+  running rows move to the top of their table, so the table reads in run order.
 - **A status line** with the window, the workers and the groups' modes, and `! wts` for the table at no model tokens.
 
 The queue lives in your project at `.autopilot/worker/queue.md`, a plain Markdown table you can read and edit.

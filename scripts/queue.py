@@ -9,15 +9,22 @@ The queue is a markdown table in <project>/.autopilot/worker/queue.md, one row p
 
 Three tables in one file. **HP** (high priority): the short tasks the background worker does one at a time and the
 user checks one by one. **MP** (medium priority): mid-sized tasks, each on its own agent, ranked between the two: they
-start before LP tasks and come before them for the shared window. **LP** (low priority): long tasks (a large rebuild),
+start before LP tasks and come before them for the shared window. **LP** (low priority): long tasks (a stage rebuild),
 each on its own agent. MP and LP each have a group mode (running / desk-only / paused) the user sets for the whole
 table. One numbering for all: a task keeps its number when it moves between tables. The file keeps the HP rows first,
 then MP, then LP, then the pinned tail (999, END, last). Rows without a Pri cell (an older queue) count as HP.
 
 Settings live in <project>/.autopilot/worker/config.json (see templates/config.json): the shared-window lock, the app's
 process name, the worker's model, and the pinned tail (e.g. [999]).
-State files beside the queue: `state` (the HP worker: running N / paused / stopped), and `mp_mode` and `lp_mode`
-(running / desk / paused: each group's mode).
+State files beside the queue: `state` (the HP workers: running N / paused / stopped, the union of every live
+session's own state), and `mp_mode` and `lp_mode` (running / desk / paused: each group's mode).
+
+Per-session settings (the user, 2026-11-07: "when we set the max parallel task for HP, mp, and LP, i want it local to
+a claude session, not a global settings"): `sessions/<session id>.json` beside the queue holds one Claude session's
+limits (HP, MP, LP) and its own HP state. The session is CLAUDE_CODE_SESSION_ID, which Claude Code sets for every
+command a session runs (`! wts` too); `--session ID` overrides it. config.json's `hp_parallel`, `mp_parallel` and
+`lp_parallel` are only the defaults a new session starts with (HP 1, MP and LP no limit when absent); `limit` never
+writes them. A session counts as live while its Claude process (CLAUDE_PID) runs.
 
 Commands (run from the project root, or pass --root):
   queue.py add [--pri HP|MP|LP] --mode append|push|override --text "..."   file a new task (HP by default)
@@ -25,7 +32,13 @@ Commands (run from the project root, or pass --root):
   queue.py state N --text "..."                           set task N's State cell (the lead's own edits)
   queue.py accept N [N ...] --words "..."                 mark tasks accepted by the user
   queue.py pri N HP|MP|LP                                 move task N to another table (its number stays)
-  queue.py worker running [N ...] | paused | stopped      write the HP workers' state file (up to hp_parallel tasks)
+  queue.py worker running [N ...] | paused | stopped      this session's HP state (its own tasks, up to its HP limit);
+                                                          the shared `state` file becomes the union of live sessions;
+                                                          the running rows move to the top of their table, in that order
+  queue.py top N [N ...]                                  move open rows to the top of their table, in the order given
+  queue.py limit                                          this session's limits and where each comes from
+  queue.py limit hp N [mp N] [lp N]                       set this session's limits (N >= 0, or "none" for no limit)
+  queue.py limit reset [hp|mp|lp ...]                     back to the defaults in config.json
   queue.py mp running | desk | paused                     write the MP group's mode
   queue.py lp running | desk | paused                     write the LP group's mode
   queue.py wts [--all]                                    the window line, then the HP, MP and LP tables
@@ -54,6 +67,21 @@ import sys
 ROW = re.compile(r"^\| (\d+) \|")
 PRIS = ("HP", "MP", "LP")
 LP_MODES = {"running": "⏩ running", "desk": "📝 desk-only", "paused": "✋ PAUSED"}   # the MP and LP groups' modes
+LIMIT_KEYS = {"HP": "hp_parallel", "MP": "mp_parallel", "LP": "lp_parallel"}       # config.json: a new session's defaults
+
+
+def pid_alive(pid):
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except PermissionError:
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def num_key(x):
+    return (0, int(x), "") if str(x).isdigit() else (1, 0, str(x))
 
 
 def now_hm():
@@ -232,6 +260,28 @@ class Queue:
         self.set_row(r, pri=pri)
         self.save()
 
+    def lift(self, ns):
+        """Put the named rows at the top of their table, in the order given (the user, 2026-11-07: "when we unpause 326,
+        it should move to the top after 309"): the rows that run go first, so the table reads in run order. A pinned or
+        closed row is left where it is. Returns the numbers moved."""
+        moved = []
+        for n in ns:
+            r = self.find(n)
+            if r["n"] in self.pinned() or self.kind(r) == "closed":
+                continue
+            line = self.lines.pop(r["i"])
+            after = [x for x in self.rows() if x["pri"] == r["pri"] and x["n"] in moved]
+            if after:
+                where = after[-1]["i"] + 1          # right after the rows lifted before it
+            else:
+                tops = [x for x in self.rows() if x["pri"] == r["pri"] and x["n"] not in self.pinned()]
+                where = tops[0]["i"] if tops else self.tail_index(r["pri"])
+            self.lines.insert(where, line)
+            moved.append(n)
+        if moved:
+            self.save()
+        return moved
+
     def migrate(self):
         """An older queue (no Pri column): add the column, every row HP (END: —)."""
         changed = False
@@ -277,9 +327,117 @@ class Queue:
     def lp_mode(self):
         return self.group_mode("LP")
 
+    # --- per-session limits and HP state (the user, 2026-11-07) ------------------------------------------------
+    def _session_file(self, sid):
+        return os.path.join(self.dir, "sessions", re.sub(r"[^A-Za-z0-9_-]", "_", sid) + ".json")
+
+    def read_session(self, sid):
+        try:
+            with open(self._session_file(sid)) as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
+
+    def write_session(self, sid, d):
+        pid = os.environ.get("CLAUDE_PID")
+        d["pid"] = int(pid) if pid and pid.isdigit() else None
+        d["updated"] = dt.datetime.now().isoformat(timespec="seconds")
+        path = self._session_file(sid)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(d, f, indent=1)
+        os.replace(tmp, path)
+
+    def sessions(self, me=""):
+        """(id, data, live) for every session file; drops dead sessions' files after 14 days."""
+        folder = os.path.join(self.dir, "sessions")
+        try:
+            names = sorted(n for n in os.listdir(folder) if n.endswith(".json"))
+        except OSError:
+            return []
+        mine = os.path.basename(self._session_file(me)) if me else ""
+        out = []
+        for n in names:
+            path = os.path.join(folder, n)
+            try:
+                with open(path) as f:
+                    d = json.load(f)
+            except (OSError, ValueError):
+                continue
+            live = n == mine or (pid_alive(d["pid"]) if d.get("pid") else
+                                 time.time() - os.path.getmtime(path) < 12 * 3600)
+            if not live and time.time() - os.path.getmtime(path) > 14 * 86400:
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
+                continue
+            out.append((n[:-5], d, live))
+        return out
+
+    def default_limit(self, pri):
+        v = self.cfg.get(LIMIT_KEYS[pri])
+        if v is None:
+            return 1 if pri == "HP" else None
+        return int(v)
+
+    def limit(self, pri, sid):
+        """This session's limit for a table, and where it comes from ("this session" or "default")."""
+        lim = self.read_session(sid).get("limits", {}) if sid else {}
+        if pri in lim:
+            return lim[pri], "this session"
+        return self.default_limit(pri), "default"
+
+    def union_state(self, me):
+        """The union of every live session's own HP state ("" when no session has written one)."""
+        running, any_running, paused, seen = set(), False, False, False
+        for sid, d, live in self.sessions(me):
+            st = d.get("hp", "")
+            if not live or not st:
+                continue
+            seen = True
+            if st.startswith("running"):
+                any_running = True
+                running.update(st.split()[1:])
+            elif st.startswith("paused"):
+                paused = True
+        if not seen:
+            return ""
+        return ("running" + (" " + " ".join(sorted(running, key=num_key)) if running else "")) if any_running else \
+            ("paused" if paused else "stopped")
+
+    def sync_state(self, me):
+        """The shared `state` file = the union of every live session's own HP state."""
+        text = self.union_state(me) or "stopped"
+        self.write_state(text)
+        return text
+
+    def current_state(self):
+        """What the HP workers are doing now: the live sessions' union, else the shared file (older writers)."""
+        return self.union_state(getattr(self, "sid", "")) or self.read_state()
+
+    def others_running(self, me):
+        """HP tasks other live sessions run in this project."""
+        mine = os.path.basename(self._session_file(me))[:-5] if me else ""
+        out = set()
+        for sid, d, live in self.sessions(me):
+            if live and sid != mine and d.get("hp", "").startswith("running"):
+                out.update(d["hp"].split()[1:])
+        return sorted(out, key=num_key)
+
     # --- the shared window ------------------------------------------------------------------------------------
+    def lock_paths(self):
+        # "locks" (a list) since 2026-10-29: several window slots (e.g. unity.lock and unity2.lock); else "lock"
+        rels = self.cfg.get("locks") or [self.cfg.get("lock", ".autopilot/run.lock")]
+        return [os.path.join(self.root, r) for r in rels]
+
     def lock_text(self):
-        lock = os.path.join(self.root, self.cfg.get("lock", ".autopilot/run.lock"))
+        held = [t for t in (self.one_lock_text(l) for l in self.lock_paths()) if t]
+        return " / ".join(held) if held else None
+
+    def one_lock_text(self, lock):
         if os.path.isdir(lock):
             try:
                 with open(os.path.join(lock, "who")) as f:
@@ -304,8 +462,17 @@ class Queue:
             return "someone"
 
     def window(self):
-        who = self.lock_text()
-        return f"🔴 Window: held by {who}" if who else "🟢 Window: free"
+        paths = self.lock_paths()
+        if len(paths) == 1:
+            who = self.lock_text()
+            return f"🔴 Window: held by {who}" if who else "🟢 Window: free"
+        # win0, win1 ... (0-based, the user 2026-10-29); 🔒 = reserved for the user's shows (<lock>.reserved)
+        out = []
+        for i, l in enumerate(paths):
+            w, r = self.one_lock_text(l), os.path.isfile(l + ".reserved")
+            name = f"win{i}" + ("🔒" if r else "")
+            out.append(f"🔴 {name}: {w}" if w else (f"🔒 win{i} reserved" if r else f"🟢 win{i} free"))
+        return " · ".join(out)
 
 
 SIGN = {"active": "⏩", "queued": "⏳", "paused": "✋", "parked": "✋", "asks": "❓", "done": "✅", "other": "⏳"}
@@ -340,7 +507,7 @@ def hp_has_work(q):
 
 
 def hp_line(q):
-    st = q.read_state() or "unknown"
+    st = q.current_state() or "unknown"
     if not st.startswith(("running", "paused")) and not hp_has_work(q):
         return "💤 idle"  # stopped with nothing to do reads as idle, not as a halt
     return {"running": "⏩ running", "paused": "✋ PAUSED", "stopped": "■ stopped"}.get(st.split(" ")[0], st) + \
@@ -380,7 +547,7 @@ def title_of(q, r):
 
 
 def is_redo(r):
-    # a task sent back for a redo (State "redo: ...") goes to the top of its table and of the run order
+    # a task sent back for a redo (State "redo: ...") goes to the top of its table and of the run order (the user, 2026-10-19)
     return Queue.head(r)[0] and Queue.kind(r) not in ("done", "closed")
 
 
@@ -429,6 +596,7 @@ def table(q, rows, show_all, term=False):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", default=os.getcwd())
+    ap.add_argument("--session", default=None, help="the Claude session (default: CLAUDE_CODE_SESSION_ID)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("add"); a.add_argument("--mode", required=True, choices=["append", "push", "override"]); a.add_argument("--text", required=True)
     a.add_argument("--pri", default="HP", choices=PRIS)
@@ -439,7 +607,9 @@ def main():
     s = sub.add_parser("state"); s.add_argument("n", type=int); s.add_argument("--text", required=True)
     c = sub.add_parser("accept"); c.add_argument("n", type=int, nargs="+"); c.add_argument("--words", required=True)
     p = sub.add_parser("pri"); p.add_argument("n", type=int); p.add_argument("pri", choices=PRIS)
+    tp = sub.add_parser("top"); tp.add_argument("n", type=int, nargs="+")
     w = sub.add_parser("worker"); w.add_argument("what", choices=["running", "paused", "stopped"]); w.add_argument("n", nargs="*")
+    lm = sub.add_parser("limit"); lm.add_argument("pairs", nargs="*", help="hp N [mp N] [lp N], or reset [hp|mp|lp ...]")
     l = sub.add_parser("lp"); l.add_argument("mode", choices=list(LP_MODES))
     mp = sub.add_parser("mp"); mp.add_argument("mode", choices=list(LP_MODES))
     t = sub.add_parser("wts"); t.add_argument("--all", action="store_true")
@@ -453,6 +623,8 @@ def main():
     if getattr(args, "text", None):  # a table row is one line: flatten line breaks and pipes
         args.text = " ".join(args.text.replace("|", "/").split())
     q = Queue(args.root)
+    sid = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    q.sid = sid
 
     if args.cmd == "add":
         n, act = q.add(args.mode, args.text, args.pri)
@@ -477,10 +649,62 @@ def main():
         for n in args.n:
             q.set_row(q.find(n), acc=f'✔ {today()} (the user: "{args.words}")')
         q.save(); print("accepted: " + ", ".join(map(str, args.n)))
+        # config "on_accept": a command run with the accepted numbers (e.g. 2026-10-30: clean the task's scratch
+        # capture frames once the user accepts it; the user: "yes, do both")
+        hook = q.cfg.get("on_accept")
+        if hook:
+            import shlex, subprocess
+            r = subprocess.run(shlex.split(hook) + [str(n) for n in args.n], cwd=q.root, capture_output=True, text=True)
+            print((r.stdout or r.stderr).strip())
     elif args.cmd == "pri":
         q.move(args.n, args.pri); print(f"{args.n} is now {args.pri}"); print_order(q)
+    elif args.cmd == "top":
+        moved = q.lift(args.n)
+        print("moved to the top of their table: " + (", ".join(map(str, moved)) or "none"))
     elif args.cmd == "worker":
-        q.write_state(args.what + (" " + " ".join(args.n) if args.n else "")); print("HP worker state: " + q.read_state())
+        text = args.what + (" " + " ".join(args.n) if args.n else "")
+        if args.what == "running" and args.n:
+            # the running rows lead their table, in the order given (2026-11-07)
+            q.lift([int(x) for x in args.n if str(x).isdigit()])
+        if not sid:   # no Claude session (a plain terminal): the shared file only, as before 2026-11-07
+            q.write_state(text); print("HP worker state: " + q.read_state())
+        else:
+            d = q.read_session(sid); d["hp"] = text; q.write_session(sid, d)
+            shared = q.sync_state(sid)
+            print("HP worker state (this session): " + text + ("" if shared == text else f"; all sessions: {shared}"))
+            lim, src = q.limit("HP", sid)
+            if args.what == "running" and lim is not None and len(args.n) > lim:
+                print(f"warning: {len(args.n)} running tasks, over this session's HP limit of {lim} ({src})")
+    elif args.cmd == "limit":
+        words = [w.lower() for w in args.pairs]
+        if words and not sid:
+            sys.exit("no Claude session: CLAUDE_CODE_SESSION_ID is not set; pass --session ID")
+        d = q.read_session(sid) if sid else {}
+        lim = d.setdefault("limits", {})
+        if words[:1] == ["reset"]:
+            for pri in ([w.upper() for w in words[1:]] or list(PRIS)):
+                if pri not in PRIS:
+                    sys.exit(f"unknown table {pri.lower()}: use hp, mp or lp")
+                lim.pop(pri, None)
+            q.write_session(sid, d)
+        elif words:
+            if len(words) % 2:
+                sys.exit("give pairs: hp N [mp N] [lp N]")
+            for pri, val in zip(words[::2], words[1::2]):
+                pri = pri.upper()
+                if pri not in PRIS:
+                    sys.exit(f"unknown table {pri.lower()}: use hp, mp or lp")
+                if val in ("none", "-", "unlimited"):
+                    lim[pri] = None
+                elif val.isdigit():
+                    lim[pri] = int(val)
+                else:
+                    sys.exit(f"{pri} limit must be a whole number >= 0, or none")
+            q.write_session(sid, d)
+        def show(pri):
+            n, src = q.limit(pri, sid)
+            return f"{pri} {'no limit' if n is None else n} ({src})"
+        print(f"limits for {'session ' + sid[:8] if sid else 'no session (defaults)'}: " + " · ".join(show(p) for p in PRIS))
     elif args.cmd in ("lp", "mp"):
         q._write(f"{args.cmd}_mode", f"{args.mode} {today()} {now_hm()}"); print(f"{args.cmd.upper()} mode: " + LP_MODES[args.mode])
     elif args.cmd == "window":
@@ -492,7 +716,7 @@ def main():
     elif args.cmd == "statusline":
         rows = [r for r in q.rows() if r["n"] not in q.pinned()]
         hp_paused = [str(r["n"]) for r in rows if r["pri"] == "HP" and q.kind(r) == "paused"]
-        st = q.read_state()
+        st = q.current_state()
         doing = ""
         who = q.lock_text() or ""
         if not re.search(r"\b(build|capture)", who):
@@ -501,9 +725,10 @@ def main():
         if st.startswith("running") and who.lower().startswith(("worker", "hp")) and verb:
             doing = " (building)" if verb == "build" else " (capturing)"
         if st.startswith("running"):
-            hp = f"HP ⏩ {st.split(' ', 1)[1] if ' ' in st else 'running'}{doing}"
+            # 2026-10-29, the user: "use HP 202/184/191. No need to show the icon, since everything shown there is already in progress"
+            hp = f"HP: {'/'.join(st.split()[1:]) if ' ' in st else 'running'}{doing}"   # the user: "show HP: 202/184/..."
         elif st.startswith("paused"):
-            hp = "HP ✋ PAUSED" + (f" at {' '.join(hp_paused)}" if hp_paused else "")
+            hp = "HP ✋ PAUSED" + (f" at {'/'.join(hp_paused)}" if hp_paused else "")   # 2026-10-28, the user: put a "/" between the numbers (no space)
         elif st.startswith("stopped") and hp_has_work(q):
             hp = "HP ■ stopped"
         else:
@@ -513,9 +738,9 @@ def main():
             if not open_:
                 return ""
             mode = q.group_mode(pri)
-            sign = {"running": "⏩", "desk": "📝 desk", "paused": "✋ PAUSED"}[mode]
-            names = " ".join(str(r["n"]) + ("✋" if q.kind(r) == "paused" and mode != "paused" else "") for r in open_)
-            return f"{pri} {sign} {names}"
+            sign = {"running": "", "desk": "📝 desk ", "paused": "✋ PAUSED "}[mode]   # running: no sign (2026-10-29, as HP)
+            names = "/".join(str(r["n"]) + ("✋" if q.kind(r) == "paused" and mode != "paused" else "") for r in open_)
+            return f"{pri}: {sign}{names}"
         # MP shows only while it has open tasks; LP always (LP none)
         mp, lp = group("MP"), group("LP") or "LP none"
         print(f"{hp}\t{mp + '  ' if mp else ''}{lp}")
@@ -531,7 +756,11 @@ def main():
         for k, pri in enumerate(p for p in PRIS if p in only):
             if k:
                 print()
-            print(f"{b}{pri}{b} · " + (f"the worker: {hp_line(q)}" if pri == "HP" else LP_MODES[q.group_mode(pri)]))
+            n, src = q.limit(pri, sid)
+            cap = f" · max {'none' if n is None else n} ({src if sid else 'default; no session'})"   # per session (2026-11-07)
+            others = q.others_running(sid) if pri == "HP" and sid else []
+            print(f"{b}{pri}{b} · " + (f"the worker: {hp_line(q)}" if pri == "HP" else LP_MODES[q.group_mode(pri)]) + cap
+                  + (f" · other sessions run {', '.join(others)}" if others else ""))
             print()
             table(q, [r for r in rows if r["pri"] == pri and r["n"] not in pinned], args.all, args.term)
         for r in rows:

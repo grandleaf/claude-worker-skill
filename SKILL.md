@@ -20,14 +20,13 @@ Files (per project; `<root>` is the project root):
 | File | What |
 |---|---|
 | `<root>/.autopilot/worker/queue.md` | The queue: rules at the top, then one table row per task, in run order |
-| `<root>/.autopilot/worker/config.json` | `lock`, `build_lock` (optional: a build that runs beside the app holds this, not `lock`), `app_process`, `worker_model`, `pinned_tail`, `brief` |
+| `<root>/.autopilot/worker/config.json` | `lock`, `locks` (optional: several window slots, a list; shown per slot by `wts` and the status line; e.g. `unity.lock` and `unity2.lock`), `build_lock` (optional: a build that runs beside the app holds this, not `lock`), `app_process`, `worker_model`, `pinned_tail`, `brief` |
 | `<root>/.autopilot/worker/state` | The HP worker's state, one line: `running N` / `paused` / `stopped` (shown as 💤 idle when no HP row is open) |
 | `<root>/.autopilot/worker/lp_mode` | The LP group's mode: `running` / `desk` / `paused` |
 | `<root>/.autopilot/worker/<task>.md` | The worker's notes, one file per task |
 | `<root>/tools/prompts/worker.md` (or `brief`) | The worker's standing brief |
 | `~/.claude/skills/worker/scripts/queue.py` | Your tool for every queue edit (see `--help`) |
 | `~/.claude/skills/worker/scripts/statusline.sh` | The status line |
-| `~/.claude/skills/worker/scripts/wts` | `! wts`: the status table for the user, at no model tokens (link it into your `PATH`) |
 
 Run the tool as `Q() { python3 ~/.claude/skills/worker/scripts/queue.py --root <root> "$@"; }`.
 
@@ -50,26 +49,39 @@ If `<root>/.autopilot/worker/queue.md` does not exist:
 **Start the worker** with the Agent tool: `run_in_background`, `name: "hp<N>"` (e.g. `hp154`), `description: "HP <N>:
 <a few words of its title>"`, `model` = the worker's model (default `opus`), prompt: "You are the background worker.
 Read `<brief>` once, then the memory index. Then do task N from `.autopilot/worker/queue.md`, report, and stop."
-Name every agent by its table and task: `hp154`, `mp111`, `lp74`, so
+Name every agent by its table and task (the user, 2026-10-22: "should we show hp154?"): `hp154`, `mp111`, `lp74`, so
 the status bar says which task each agent is on. A worker lives for one task, so the name never goes stale. Later
 messages go by `SendMessage` to that name; tell an advisor the name of the worker it works with. A message reaches
 it at its next step; if it had finished, the message resumes it with its context. The worker cannot spawn agents.
 
-**Up to `hp_parallel` HP workers at once (config.json).**
-Whenever fewer HP workers run than `hp_parallel` (default 1), start the next queued HP task in its own `hp<N>` worker,
-skipping a task that would touch the same area, files or model as one already running (take the next free one, and
-say so). Record all running tasks: `queue.py worker running 128 171`. The workers share the tree, the shared-window lock
+**Up to this session's HP limit at once (the user, 2026-10-25: "set max paralle task in HP to be 2"; 2026-10-27: "set HP's maximum paralle task to be 5").**
+**Limits are per Claude session** (the user, 2026-11-07: "when we set the max parallel task for HP, mp, and LP, i want
+it local to a claude session, not a global settings"). `Q limit` shows this session's HP, MP and LP limits and where
+each comes from; `Q limit hp 2 mp 0` sets them for this session only, `Q limit reset [hp|mp|lp]` goes back to the
+defaults. config.json's `hp_parallel`, `mp_parallel` and `lp_parallel` are only the defaults a new session starts
+with (HP 1, MP and LP no limit when absent): never edit them for a user's "set the max parallel to N". The session is
+`CLAUDE_CODE_SESSION_ID`, set by Claude Code for every command; `wts` shows each limit in its table's heading.
+Whenever fewer HP workers run than this session's HP limit, start the next queued HP task in its own `hp<N>` worker.
+**Strict top N (the user, 2026-10-29: "Just do top N, so I can easily tracking them"):** the open HP tasks run in
+table order, the top N rows (N = this session's HP limit); never skip a row because it is blocked (a build, the licence) or shares a
+file with a running task. A blocked task keeps its slot, does what it can and waits ("waiting for a build: …"); two
+tasks on one file are each told the other's entries. A slot frees only when a task is done. Record this session's running tasks: `queue.py worker running 128 171`
+(it writes this session's own state; the shared `state` file and the status line show the union of all live
+sessions). It also moves the running rows to the top of their table, in the order given, so the table always reads in
+run order: a task started out of order (the user's word: "unpause 326") goes right after the ones already running
+(the user, 2026-11-07: "when we unpause 326, it should move to the top after 309"). `Q top N ...` does the same by hand. **Another session leading the same project:** rows it runs are its own (`wts` says "other sessions run
+…"); skip them and take the top N of the rest. The workers share the tree, the game window lock
 and the build: tell each one the other is running, which files are its, and that a build failing in the other's files
 means wait and retry, never edit them.
 
-**A fresh agent per task.** Every step an agent takes sends its whole context again, and that counts against the
-user's quota. A worker kept across eight tasks can grow to well over 800k tokens.
+**A fresh agent per task (the user, 2026-10-22).** Every step an agent takes sends its whole context again, and that
+counts against the user's quota. A worker kept across tasks 146 to 153 grew to about 846k tokens.
 - **HP:** start a fresh worker for each task, named for it (`hp<N>`). The old one is retired: send it nothing more.
 - **A redo right after the show** may go back to the same worker while its context is under about 300k. Past that, a
   fresh worker does it from the task's notes.
 - **MP and LP:** a fresh agent for each unit or milestone, carrying on from the task's journal or status file, once
   the agent is past about 300k; a smaller one carries on into the next unit (a fresh agent's catch-up would cost more).
-- **Handing over a long task (MP or LP: a large rebuild):** only at a unit boundary or a clean point, never in the
+- **Handing over a long task (MP or LP: a stage rebuild):** only at a unit boundary or a clean point, never in the
   middle of a change. The journal and status file must hold the why of each decision and the dead ends. Before it
   edits anything, the fresh agent sends you its plan for the unit in a few lines; check it against the journal (a
   misread handoff is caught here), then let it go on. Review every unit as before; that catches drift.
@@ -83,24 +95,25 @@ user's quota. A worker kept across eight tasks can grow to well over 800k tokens
 - **The handoff is the notes file.** The brief tells the worker to write it so that an agent knowing nothing of the
   task can do a redo from it alone.
 
-**A visual task gets a visual advisor.** Any task about how something looks or moves (a model, an effect, a shader, a
+**A visual task gets a visual advisor (the user, 2026-10-22: "If an work item related to the visual, please also ask
+for a visual advisor for suggestion").** Any task about how something looks or moves (a model, an effect, a shader, a
 motion, scenery) starts with two agents: the worker `hp<N>` and an advisor `adv<N>`. The advisor researches real
-references, inspects and scores, but never edits the project's files or builds.
+references (and the Sky Force walkthrough where it fits), inspects and scores, but never edits game files or builds.
 It sends the worker its advice, and it sends the lead one line after each round. It scores two task-specific criteria
 0-10, for up to 4 rounds, and stops at 8+ on both. When a reference image or clip matters, it makes side-by-side sheets
 of the reference against ours at the same scale. Before the rounds start, the worker saves the files it will touch to
 `.autopilot/worker/<topic>-pre-advisor/`. If the rounds run out below 8, the worker does one final fix pass on the
 advisor's last points, with no further round, and the lead checks the frames. A pure logic or data fix with no look to
-judge needs no advisor. Anything that moves is judged from a clip from round 1, never from stills alone (motion that passes on stills can
-still fail at the show); say so in both briefs. The advisor's prompt: the job and the user's words, how to see it,
-the rules, round 0, the rounds, the lead line, the final report.
+judge needs no advisor. Anything that moves is judged from a clip from round 1, never from stills alone (the user,
+2026-10-25, task 169: 166 passed on stills and failed at the show); say so in both briefs. The template for the advisor's prompt is the adv128/adv129 prompt: the job and the user's
+words, how to see it, the rules, round 0, the rounds, the lead line, the final report.
 
 ## 1b. Three tables: HP, MP and LP
 
 The queue has a **Pri** column. **HP** (high priority): short tasks the one background worker does in order, which the
-user checks one by one. **MP** (medium priority): mid-sized tasks, too big for the worker's queue but
-not a large rebuild, each on its own agent that you start with the Agent tool (its row says so). **LP** (low
-priority): long tasks (a large rebuild, a big refactor), each on its own agent too. **One numbering** for all; a task
+user checks one by one. **MP** (medium priority, added 2026-10-18): mid-sized tasks, too big for the worker's queue but
+not a stage rebuild, each on its own agent that you start with the Agent tool (its row says so). **LP** (low
+priority): long tasks (a stage rebuild, a big refactor), each on its own agent too. **One numbering** for all; a task
 keeps its number when it moves (`Q pri N HP|MP|LP`). The file keeps HP rows first, then MP, then LP, then END.
 
 **The order between them.** HP comes first, then MP, then LP: you start MP agents before LP ones, and when the shared
@@ -135,8 +148,10 @@ should refuse otherwise): one unknown key can stop the app from loading.
 | `HP N` / `LP N` | Moves task N to that table. | `Q pri N HP|LP`; tell the agents concerned. |
 | `pause LP` / `LP desk-only` / `resume LP` | — | `Q lp paused|desk|running`; message every LP agent. |
 | `pause N` | — | That task only: PAUSE to the agent running it; the HP worker goes on to the next HP task. |
+| "max parallel N" for HP, MP or LP ("set HP's max parallel to 2") | — | `Q limit hp 2` (this session only); start or let finish agents to match; never edit config.json for it. |
 | `pause the worker` | — | Send PAUSE; `Q worker paused`. |
 | `resume`, `worker: continue` | — | Send RESUME with what changed while paused and the order; `Q worker running`. |
+| `reserve winN` / `release winN` (projects with `locks`) | — | Keep a window for the user's shows / give it back: the project's tool (e.g. `tools/winres.sh reserve|release win0|win1|all`); say what is in that window now. |
 | `show me N` / `show me <thing>` | — | Open the app at what task N changed, if the window is free (section 5). |
 
 Every row is written by you, in the user's own words first (in quotes), then what they mean in plain terms, then how
@@ -144,40 +159,47 @@ it will be checked and what picture sheet to make. One row, one outcome. A follo
 not a new task. When a new note supersedes an open task, fold the old one in (`Q state N --text "folded into M"` and
 set its Accepted to `n/a (folded into M)`).
 
-**Keeping the machine awake.** On macOS, queuing any task starts `caffeinate -dims` in the background if it is
-not running, and you stop it when the worker reports "queue empty". **Where there is no `caffeinate` -- Linux, or any
-server that does not sleep -- skip this entirely**: do not look for a substitute, and do not mention it in the status
-table. `queue.py` already omits the segment when the command is absent, so the two agree. **The model rule:** every task runs on the worker's model unless the user explicitly
+**`caffeinate -dims` (macOS) runs exactly while some agent is working** (the user, 2026-11-05: "when there's nothing
+in the WTS to do, e.g. all paused, or the max parallel set to 0 and all task can be run are finished, we need turn off
+the caffinate"). Start it (in the background, if not running) whenever an agent starts or resumes: queuing a task that
+will start, unpause, raising a table's limit (`Q limit`). Stop it (TaskStop) as soon as no agent is working: all three tables
+paused and every agent confirmed paused; the limits at 0 and the last running agent finished; or "queue empty". After
+every agent's final report, a pause, or a limit change, check: any worker, MP/LP agent or advisor still working? If
+none, stop it. Queuing a task that cannot start (tables paused or at 0) does not start it. **Stop only your own
+caffeinate** (TaskStop on the background task you started, or `kill` its own pid): never `pkill caffeinate` or
+`killall caffeinate`, since other Claude sessions (other projects) run their own, and a pkill puts the Mac to sleep
+under their agents (2026-11-07: one project's lead ran `pkill -x caffeinate` and killed another project's while its worker ran). **Where there is no `caffeinate`** (Linux, or a server that does not sleep), skip all of this: no substitute, and `queue.py` leaves the segment out. **The model rule:** every task runs on the worker's model unless the user explicitly
 puts a task on another model; such a task gets its own fresh agent on that model, started by you, and its row says
 "Runs as a fresh agent on the <Model> model".
 
 ## 3. The status table (`wts`)
 
-**Fast path (fast, and cheap in tokens):** run `Q wts` and paste its output as it is: the window line, the HP table, the LP table, END. Do not
+**Fast path (the user, 2026-10-17: "can we make the \"wts\" table display faster? now it takes a while and burn quite
+some tokens"):** run `Q wts` and paste its output as it is: the window line, the HP table, the LP table, END. Do not
 rewrite it. It reads short titles from `.autopilot/worker/titles.json` (give one when filing: `Q add … --title "a few
 words"`, or `Q title N --text …`), cuts each State to its head, and marks done rows "to review" until you have
 reviewed them (`Q reviewed N …`, or a "Lead review" addendum; a reviewed done row shows no mark). Add a line under it only if something needs saying.
-**Zero tokens:** the user can type `! wts` (`scripts/wts` linked into the `PATH`, which runs `queue.py wts --term`: the same content
+**Zero tokens:** the user can type `! wts` (`~/.local/bin/wts`, which runs `queue.py wts --term`: the same content
 as `Q wts`, its tables boxed with ┌┬┐ lines). Never fold rows into prose; never group tasks.
 
 ```
-🔴 Window: held by hp86 capture 10:08 · caffeinate on
+🔴 Window: held by worker capture Sun Oct 18 10:08:26 PDT 2026 · caffeinate on
 
 **HP** · the worker: ⏩ running 86
 
 | # | Task | Runs on | Status | Accepted |
 |---|---|---|---|---|
-| 86 | Settings page loads the saved theme | Worker (Opus 5.5) | ⏩ in progress 09:36 | — |
-| 87 | Search box keeps focus after Enter | Worker (Opus 5.5) | ⏳ queued | — |
-| 83 | Sidebar icons line up at 125% zoom | Worker (Opus 5.5) | ✅ done 00:18 | — |
+| 86 | Islet turtle swims in and fades out smoothly | Worker (Opus 5.5) | ⏩ in progress 09:36 | — |
+| 87 | Seal moves earlier, seen entering the water | Worker (Opus 5.5) | ⏳ queued | — |
+| 83 | Dolphins move to d1875, left side | Worker (Opus 5.5) | ✅ done 00:18 | — |
 
 **LP** · 📝 desk-only
 
 | # | Task | Runs on | Status | Accepted |
 |---|---|---|---|---|
-| 74 | Rebuild the editor's undo history | Opus 5.5 | ✋ waiting for the window | — |
-| 77 | Port the renderer to the new API | Opus 5.5 | ⏩ in progress · waits for the window | — |
-| 52 | Rewrite the import pipeline | Fable 5.1 | ✅ done 07:37 | — |
+| 74 | Stage 5 (Red Canyon) rebuild | Opus 5.5 | ✋ waiting for the window | — |
+| 77 | Stage 6 (Oil Fields) rebuild | Opus 5.5 | ⏩ in progress · waits for the window | — |
+| 52 | Stage 4 (Dune Road) rebuild | Fable 5.1 | ✅ done 07:37 | — |
 
 999 END: when all three tables are empty, "queue empty", then the lead stops caffeinate (macOS only).
 ```
@@ -191,7 +213,7 @@ as `Q wts`, its tables boxed with ┌┬┐ lines). Never fold rows into prose; 
 | `paused` | ✋ | open |
 | `parked` / `waiting` / `hold` / `on hold` | ✋ | open |
 | `queued` | ⏳ | open |
-| anything else (an agent's own words) | ⏳ | open: **never hidden** |
+| anything else (an agent's own words) | ⏳ | open: **never hidden** (until 2026-10-18 such a row vanished) |
 | `done` | ✅ | after the open rows |
 | Accepted ✔ or n/a | — | left out (`wts --all` shows them) |
 
@@ -200,8 +222,8 @@ as `Q wts`, its tables boxed with ┌┬┐ lines). Never fold rows into prose; 
 - **Runs on** is the last "on the <Model> model" in the row's text, so an addendum that moves a task to another model
   ("From now on it runs on the Opus 5.5 model") changes the column; with none, the worker's model.
 - **The HP heading** shows the state file: ⏩ running N, ✋ PAUSED, ■ stopped while HP rows are still open, and
-  **💤 idle** when no HP row is open (nothing to do reads as idle, not as a halt). The status line uses the same
-  words.
+  **💤 idle** when no HP row is open (the user, 2026-10-18: "while HP has nothing to do, status line … should be
+  IDLE, not STOPPED"). The status line uses the same words.
 - Tell every agent to begin its State with one of those words (`in progress 09:20: U1 built, waiting for the lead`),
   and fix a row whose State has gone stale (`Q state N --text "in progress …"`).
 
@@ -230,8 +252,8 @@ pause and resume. If the status line shows the wrong state, fix the file.
 
 The lead and the worker share one built app, so one build or run at a time, under the lock in `config.json`.
 **The window lock is held only while the app is open or a new build is swapped in:** never across reading frames, editing or thinking; one run per take, released the moment the app closes, so a
-showing gets in between a worker's runs. Workers use the project's one-run helper (e.g. a `tools/run1.sh` that a capture
-script calls per run) and its build tool (e.g. `tools/build.sh`), which builds beside the app
+showing gets in between a worker's runs. Workers use the project's one-run helper (e.g. a `tools/run1.sh`, which
+`.autopilot/worker/bin/shots.sh` calls per spec) and its build tool (`tools/build.sh`), which builds beside the app
 under a separate build lock (`build_lock` in `config.json`) and takes the window lock only for the swap. A worker's
 own capture wrapper calls the helper per run; it never takes the window lock across a loop of runs.
 - Your showing, run in the background so the conversation goes on:
