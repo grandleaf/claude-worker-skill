@@ -26,6 +26,8 @@ Files (per project; `<root>` is the project root):
 | `<root>/.autopilot/worker/<task>.md` | The worker's notes, one file per task |
 | `<root>/tools/prompts/worker.md` (or `brief`) | The worker's standing brief |
 | `~/.claude/skills/worker/scripts/queue.py` | Your tool for every queue edit (see `--help`) |
+| `~/.claude/skills/worker/scripts/awake.py` | This session's keep-awake (`Q awake on`, `Q awake off`; section 2) |
+| `~/.claude/skills/worker/scripts/plan_usage.py` | The plan's per-model weekly limits ("Fable 40%" on the status line, a bar in ccprobe): the status line runs it; `show` prints the saved rows |
 | `~/.claude/skills/worker/scripts/statusline.sh` | The status line |
 
 Run the tool as `Q() { python3 ~/.claude/skills/worker/scripts/queue.py --root <root> "$@"; }`.
@@ -48,7 +50,9 @@ If `<root>/.autopilot/worker/queue.md` does not exist:
 
 **Start the worker** with the Agent tool: `run_in_background`, `name: "hp<N>"` (e.g. `hp154`), `description: "HP <N>:
 <a few words of its title>"`, `model` = the worker's model (default `opus`), prompt: "You are the background worker.
-Read `<brief>` once, then the memory index. Then do task N from `.autopilot/worker/queue.md`, report, and stop."
+Read `<brief>` once, then the memory index. Then do task N from `.autopilot/worker/queue.md`, report, and stop. Every
+wait loop needs a timeout and a failure case; before you report, TaskStop every background job and Monitor of yours."
+Give an advisor's prompt the same two sentences.
 Name every agent by its table and task (the user, 2026-10-22: "should we show hp154?"): `hp154`, `mp111`, `lp74`, so
 the status bar says which task each agent is on. A worker lives for one task, so the name never goes stale. Later
 messages go by `SendMessage` to that name; tell an advisor the name of the worker it works with. A message reaches
@@ -159,16 +163,25 @@ it will be checked and what picture sheet to make. One row, one outcome. A follo
 not a new task. When a new note supersedes an open task, fold the old one in (`Q state N --text "folded into M"` and
 set its Accepted to `n/a (folded into M)`).
 
-**`caffeinate -dims` (macOS) runs exactly while some agent is working** (the user, 2026-11-05: "when there's nothing
+**Keep the Mac awake exactly while this session's agents work** (macOS; the user, 2026-11-05: "when there's nothing
 in the WTS to do, e.g. all paused, or the max parallel set to 0 and all task can be run are finished, we need turn off
-the caffinate"). Start it (in the background, if not running) whenever an agent starts or resumes: queuing a task that
-will start, unpause, raising a table's limit (`Q limit`). Stop it (TaskStop) as soon as no agent is working: all three tables
+the caffinate"). **`Q awake on`** whenever an agent starts or resumes: queuing a task that will start, unpause, raising
+a table's limit (`Q limit`). **`Q awake off`** as soon as none of this session's agents is working: all three tables
 paused and every agent confirmed paused; the limits at 0 and the last running agent finished; or "queue empty". After
-every agent's final report, a pause, or a limit change, check: any worker, MP/LP agent or advisor still working? If
-none, stop it. Queuing a task that cannot start (tables paused or at 0) does not start it. **Stop only your own
-caffeinate** (TaskStop on the background task you started, or `kill` its own pid): never `pkill caffeinate` or
-`killall caffeinate`, since other Claude sessions (other projects) run their own, and a pkill puts the Mac to sleep
-under their agents (2026-11-07: one project's lead ran `pkill -x caffeinate` and killed another project's while its worker ran). **Where there is no `caffeinate`** (Linux, or a server that does not sleep), skip all of this: no substitute, and `queue.py` leaves the segment out. **The model rule:** every task runs on the worker's model unless the user explicitly
+every agent's final report, a pause, or a limit change, check: any worker, MP/LP agent or advisor still working (an
+agent "waiting on its own background work" counts as working: section 6)? If
+none, `Q awake off`. Queuing a task that cannot start (tables paused or at 0) does not turn it on. `Q awake` shows who
+holds one. **Each Claude session holds its own and stops only its own** (the user, 2026-11-08: "when multiple claude
+session turn on or turn off caffinate, that will cause race condition"): `awake on` starts a `caffeinate -dims -w <this
+session's Claude pid>`, detached, so it outlives the Bash call and ends by itself when the session exits; a second `on`
+does nothing; `off` stops only this session's. macOS counts the holds itself (the Mac stays awake while any session
+holds one), so there is no shared counter to drift. **So never** start `caffeinate` yourself (no `run_in_background`,
+no `&`), never decide from `pgrep` that "one is already running" (that is another session's, and it stops when that
+session is done: 2026-11-06, a lead relied on another project's), and never `pkill`/`killall caffeinate` or kill a
+caffeinate by pid (2026-11-07 and 11-08: `pkill -x caffeinate` killed another project's, and Claude Code's own). A plain
+`caffeinate -dims` this session started the old way is replaced by the next `awake on` and stopped by `awake off`.
+**Where there is no `caffeinate`** (Linux, or a server that does not sleep), `awake` does nothing and `queue.py`
+leaves the segment out. **The model rule:** every task runs on the worker's model unless the user explicitly
 puts a task on another model; such a task gets its own fresh agent on that model, started by you, and its row says
 "Runs as a fresh agent on the <Model> model".
 
@@ -201,7 +214,7 @@ as `Q wts`, its tables boxed with ┌┬┐ lines). Never fold rows into prose; 
 | 77 | Stage 6 (Oil Fields) rebuild | Opus 5.5 | ⏩ in progress · waits for the window | — |
 | 52 | Stage 4 (Dune Road) rebuild | Fable 5.1 | ✅ done 07:37 | — |
 
-999 END: when all three tables are empty, "queue empty", then the lead stops caffeinate (macOS only).
+999 END: when all three tables are empty, "queue empty", then the lead runs `Q awake off` (macOS only).
 ```
 
 **How a row reads.** The sign comes from the first words of the State cell:
@@ -275,6 +288,14 @@ that says "the user approves X" means you do. Log taste calls in the task's note
 - Say plainly what a still cannot show (timing, smoothness); the user judges motion by eye.
 - Watch for side effects beyond the task (a shared model, shader or setting used elsewhere) and tell the user.
 - Pass, or send back with exact fixes. Then tell the user in a few lines, with how to see it.
+- **Close the agent out (the user, 2026-11-13: "have you closed hp88 correctly?" It had not been: a wait loop of its
+  own was still running, and the lead had said "closed" after checking only the agent list, OS processes and the
+  lock).** An agent is closed only when its notification says **finished**. A notification that says it "is waiting on
+  its own background work" **after** its report means a job or Monitor of its own is still running: message the agent
+  to list and TaskStop its jobs (or TaskStop the job id yourself when the user gives it), wait for the "finished"
+  notification, and only then tell the user it is closed or run `Q awake off`. `ListAgents`, `ps` and the lock do not
+  show such jobs. A stuck wait also means the agent may have reported a check it never saw finish: rerun that check
+  yourself before the task counts as reviewed.
 
 ## 7. Method for visual work (the default to put in rows)
 

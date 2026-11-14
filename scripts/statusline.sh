@@ -7,10 +7,14 @@
 #   HP ⏩ N (building/capturing) | HP ✋ PAUSED at N | HP ■ stopped | HP idle   (the background worker, short tasks)
 #   LP ⏩ 52 74 | LP 📝 desk 52 | LP ✋ PAUSED 52 74 | LP none                          (long tasks; 📝 desk = kept off the window)
 #   MP ⏩ 110 (shown before LP, only while MP has open tasks; the same signs as LP)
+#   ctx 41% · week 24% · fable 40%   (context use; the plan's weekly limit; each model's own week, from plan_usage.py)
+#   A part with something running (HP: 49; MP or LP running with a task in progress) is drawn in bright white
+#   (queue.py statusline adds the codes; the user, 2026-11-07)
 # The lock: a directory taken by the lead (an optional `who` file inside names it), or a file written by the worker
 # ("worker build|capture <date>"). The HP worker's state: <cwd>/.autopilot/worker/state ("running N" / "paused" / "stopped");
 # the LP group's mode: <cwd>/.autopilot/worker/lp_mode ("running" / "desk" / "paused").
 SL_INPUT=$(cat); export SL_INPUT
+SL_DIR=$(cd "$(dirname "$0")" && pwd); export SL_DIR
 eval "$(python3 - <<'EOF' 2>/dev/null
 import json, os, shlex
 try:
@@ -54,14 +58,91 @@ try:
             wkr = time.strftime("%a %H:%M", time.localtime(int(sd["resets_at"])))
 except Exception:
     pass
+# Keep the plan limits for the ccprobe page (the user, 2026-11-08: "show how many weekly quota still left ... in the
+# ccprobe web interface"): Claude Code gives rate_limits only to the status line, so the latest goes to
+# ~/.cache/ccprobe/rate-limits.json, written when it changes or once a minute (the file time says it is fresh).
+# Every session writes it, and an idle one still passes on the figure from its last reply (two days old, say), so
+# each window keeps the newest reading: the later reset, and for the same reset the higher figure (use only grows
+# inside a window). A window whose reset has passed is dropped.
+try:
+    rl = d.get("rate_limits")
+    if isinstance(rl, dict) and rl:
+        import time
+        rdir = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "ccprobe")
+        rpath = os.path.join(rdir, "rate-limits.json")
+        def _n(v):
+            return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+        def _age(w):
+            return (_n(w.get("resets_at")), _n(w.get("used_percentage"))) if isinstance(w, dict) else (-1, -1)
+        try:
+            with open(rpath) as f:
+                old = json.load(f).get("rate_limits")
+            old = old if isinstance(old, dict) else {}
+            fresh = time.time() - os.path.getmtime(rpath) < 60
+        except Exception:
+            old, fresh = {}, False
+        now = time.time()
+        new = {k: w for k, w in old.items() if not (0 < _n((w or {}).get("resets_at")) < now)}
+        for k, w in rl.items():
+            if isinstance(w, dict) and _age(w) >= _age(new.get(k)) and not (0 < _n(w.get("resets_at")) < now):
+                new[k] = w
+        if new != old or not fresh:
+            os.makedirs(rdir, exist_ok=True)
+            tmp = "%s.%d.tmp" % (rpath, os.getpid())
+            with open(tmp, "w") as f:
+                json.dump({"rate_limits": new}, f)
+            os.replace(tmp, rpath)
+            for x in os.listdir(rdir):
+                if x.endswith(".tmp") and now - os.path.getmtime(os.path.join(rdir, x)) > 600:
+                    os.unlink(os.path.join(rdir, x))
+        nw = (new.get("seven_day") or {}).get("used_percentage")
+        if isinstance(nw, (int, float)):
+            wk = str(int(round(nw)))
+except Exception:
+    pass
+# The weekly limit of one model, the Fable week (the user, 2026-11-13: "for the weekly usage bar, can we also add
+# another one for the fable weekly? also include it in the current status bar"): not in rate_limits, so plan_usage.py
+# asks a headless Claude Code for the usage rows and saves them to ~/.cache/ccprobe/plan-usage.json; this shows them,
+# as "fable 40%", lower case like "week", with the age once over half an hour, and starts that fetch in the background when it is due.
+fab = ""
+try:
+    import sys, time, subprocess
+    sys.dont_write_bytecode = True
+    sys.path.insert(0, os.environ.get("SL_DIR") or ".")
+    import plan_usage
+    snap = plan_usage.load()
+    now = time.time()
+    age = now - (snap.get("fetched_at") or 0)
+    got = []
+    for r in snap.get("limits") or []:
+        sc = r.get("scope") or {}
+        nm = (sc.get("model") or {}).get("display_name") or (sc.get("surface") or {}).get("display_name")
+        rs = r.get("resets_at")
+        try:
+            gone = bool(rs) and plan_usage.when(rs) <= now
+        except Exception:
+            gone = False
+        if r.get("kind") == "weekly_scoped" and nm and isinstance(r.get("percent"), (int, float)) and not gone:
+            got.append("%s %d%%" % (nm.lower(), round(r["percent"])))
+    if got:
+        fab = " · ".join(got)
+        if age > 1800:
+            fab += " %s" % (("%dm ago" % (age // 60)) if age < 3600 else ("%dh ago" % (age // 3600)) if age < 86400 else ("%dd ago" % (age // 86400)))
+    week = int(wk) if wk else None
+    if plan_usage.available() and plan_usage.due(week, snap, now):
+        subprocess.Popen([sys.executable, plan_usage.__file__, "refresh"] + (["--week", str(week)] if week is not None else []),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+except Exception:
+    pass
 cfg = {}
 try:
     with open(os.path.join(c, ".autopilot", "worker", "config.json")) as f:
         cfg = json.load(f)
 except Exception:
     pass
-print("MODEL=%s CWD=%s PCT=%s WK=%s WKR=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % (
-    shlex.quote(m), shlex.quote(c), shlex.quote("" if pct is None else str(int(pct))), shlex.quote(wk), shlex.quote(wkr),
+print("MODEL=%s CWD=%s PCT=%s WK=%s WKR=%s FAB=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % (
+    shlex.quote(m), shlex.quote(c), shlex.quote("" if pct is None else str(int(pct))), shlex.quote(wk), shlex.quote(wkr), shlex.quote(fab),
     shlex.quote(" ".join(cfg.get("locks") or [cfg.get("lock", ".autopilot/run.lock")])), shlex.quote(cfg.get("app_process", "")),
     shlex.quote(cfg.get("build_lock", ""))))
 EOF
@@ -119,16 +200,25 @@ if [ -d "$CWD/.autopilot/worker" ]; then
     parts+=("${hplp#*$'\t'}")
   fi
 fi
-# A safety net (the user, 2026-11-05): caffeinate should run only while an agent works. With it on and no queue row
-# "in progress"/"in hand" in any table, say so: "☕ on · nothing working" (the lead missed turning it off).
-if pgrep -f "^caffeinate -dims" >/dev/null 2>&1; then
-  busy=1
-  if [ -f "$CWD/.autopilot/worker/queue.md" ]; then
-    busy=$(awk -F'|' '$2 ~ /^ *[0-9]+ *$/ && $5 ~ /^ *(in progress|in hand)/ {n++} END{print n+0}' "$CWD/.autopilot/worker/queue.md" 2>/dev/null)
-  fi
-  if [ "${busy:-1}" = "0" ]; then parts+=("☕ on · nothing working"); else parts+=("☕ on"); fi
-elif command -v caffeinate >/dev/null 2>&1; then parts+=("☕ off"); fi
+# Keep-awake: since 2026-11-08 each Claude session holds its own (`queue.py awake on|off`, awake.py: a
+# `caffeinate -dims -w <its Claude pid>`), so this part says whether THIS session holds one: "☕ on", "☕ off", or
+# "☕ off · on in 2 other sessions" when only others keep the Mac awake (theirs can stop at any time).
+# A safety net (the user, 2026-11-05): with this session holding one and no queue row "in progress"/"in hand" in any
+# table, say so: "☕ on · nothing working" (the lead missed turning it off).
+if command -v caffeinate >/dev/null 2>&1; then
+  set -- $(python3 "$(dirname "$0")/awake.py" counts 2>/dev/null); mine=${1:-0}; others=${2:-0}
+  if [ "$mine" -gt 0 ]; then
+    busy=1
+    if [ -f "$CWD/.autopilot/worker/queue.md" ]; then
+      busy=$(awk -F'|' '$2 ~ /^ *[0-9]+ *$/ && $5 ~ /^ *(in progress|in hand)/ {n++} END{print n+0}' "$CWD/.autopilot/worker/queue.md" 2>/dev/null)
+    fi
+    if [ "${busy:-1}" = "0" ]; then parts+=("☕ on · nothing working"); else parts+=("☕ on"); fi
+  elif [ "$others" -gt 0 ]; then
+    if [ "$others" = 1 ]; then parts+=("☕ off · on in 1 other session"); else parts+=("☕ off · on in $others other sessions"); fi
+  else parts+=("☕ off"); fi
+fi
 [ -n "$PCT" ] && parts+=("ctx ${PCT}%")
 [ -n "$WK" ] && parts+=("week ${WK}%")
+[ -n "$FAB" ] && parts+=("$FAB")
 out=""; for p in "${parts[@]}"; do out="${out:+$out · }$p"; done
 printf '%s' "$out"

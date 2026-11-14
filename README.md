@@ -13,7 +13,10 @@ reviews what comes back, and shows you the result. You keep working with the lea
 - **A fresh agent per task**, so contexts stay small; the task's notes file is the hand-off for a redo.
 - **Limits per Claude session:** `queue.py limit hp 2 mp 1` sets how many agents this session runs at once; the
   running rows move to the top of their table, so the table reads in run order.
-- **A status line** with the window, the workers and the groups' modes, and `! wts` for the table at no model tokens.
+- **A status line** with the window, the workers and the groups' modes, the plan's weekly limits (`week 24% · fable 40%`:
+  the all-models week and each model's own), and `! wts` for the table at no model tokens.
+- **One keep-awake per Claude session** (macOS): `queue.py awake on|off`; a session stops only its own, and its hold
+  ends by itself when the session exits.
 
 The queue lives in your project at `.autopilot/worker/queue.md`, a plain Markdown table you can read and edit.
 
@@ -40,6 +43,8 @@ Then, in a project, ask Claude Code to "set up a background worker". The lead fo
 | `scripts/queue.py` | The lead's tool for every queue edit (`python3 scripts/queue.py --help`) |
 | `scripts/statusline.sh` | The status line |
 | `scripts/wts` | Prints the status table (`queue.py wts --term`) for the project above the current folder |
+| `scripts/awake.py` | This session's keep-awake (`queue.py awake on`, `off`, `status`) |
+| `scripts/plan_usage.py` | Each model's own weekly limit, asked of a headless Claude Code (`get_usage`: no prompt, no tokens) for the status line; `show` prints the saved rows |
 | `scripts/ctx.py` | Each background agent's context size, to know when a fresh one is cheaper |
 | `templates/` | A new project's `queue.md`, `config.json` and the worker's brief |
 

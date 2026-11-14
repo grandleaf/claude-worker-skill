@@ -45,6 +45,8 @@ Commands (run from the project root, or pass --root):
   queue.py order                                          the pending run order, one line each
   queue.py window                                         who holds the shared window
   queue.py statusline                                     the HP part, then the MP and LP parts (tab-separated)
+  queue.py awake on | off | status                        keep the Mac awake while this session's agents work: each
+                                                          Claude session holds its own and stops only its own (awake.py)
 
 Placement (the user's words), within the task's own table:
   append / queue / "worker: ..."  at the tail of its table (HP: before the MP rows; MP: before the LP rows; LP:
@@ -56,6 +58,7 @@ Only the State cell is a worker's; everything else in the queue is the lead's.
 """
 import argparse
 import datetime as dt
+import importlib.util
 import json
 import os
 import re
@@ -483,7 +486,22 @@ def runs_on(q, r):
     return m[-1] if m else q.cfg.get("worker_model", "the worker")
 
 
-def caffeinated():
+def _load_awake():
+    """awake.py beside this file (one hold per Claude session), loaded now so a host that imports queue.py with
+    bytecode writing off (ccprobe) loads it the same way."""
+    try:
+        spec = importlib.util.spec_from_file_location("worker_awake", os.path.join(os.path.dirname(os.path.abspath(__file__)), "awake.py"))
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        return m
+    except Exception:
+        return None
+
+
+awake = _load_awake()
+
+
+def caffeinated(session=None):
     """True or False while a keep-awake can exist, None where it cannot.
 
     `caffeinate` is macOS-only.  On a machine without it -- Linux, or any
@@ -491,13 +509,40 @@ def caffeinated():
     "caffeinate off" would be a status report about a feature that is not
     there.  None means "not applicable" and the callers leave the segment out,
     which is what `statusline.sh` already does with `command -v`.
+
+    With `session` (a Claude pid): whether that session holds its own (since
+    2026-11-08 each session holds one, see awake.py); without: whether any does.
     """
     if not shutil.which("caffeinate"):
         return None
+    if awake:
+        hs = awake.holds()
+        return any(h["session"] == session for h in hs) if session else bool(hs)
     try:
         return subprocess.run(["pgrep", "-f", "^caffeinate -dims"], capture_output=True).returncode == 0
     except OSError:
         return False
+
+
+def awake_holds():
+    """{Claude session pid: its holds} (0: a hold no session owns); None where there is no caffeinate or no awake.py."""
+    if not awake or not shutil.which("caffeinate"):
+        return None
+    out = {}
+    for h in awake.holds():
+        out[h["session"]] = out.get(h["session"], 0) + 1
+    return out
+
+
+def awake_text():
+    """The wts line's part: this session's own hold, and whether others keep the Mac awake."""
+    if not shutil.which("caffeinate"):
+        return ""
+    if not awake:
+        return f" · caffeinate {'on' if caffeinated() else 'off'}"
+    mine, others = awake.counts()
+    return (" · caffeinate " + ("on" if mine else "off")
+            + (f" (on in {others} other session{'s' if others != 1 else ''})" if others and not mine else ""))
 
 
 def hp_has_work(q):
@@ -619,7 +664,13 @@ def main():
     sub.add_parser("window")
     sub.add_parser("statusline")
     sub.add_parser("migrate")
+    aw = sub.add_parser("awake"); aw.add_argument("what", nargs="?", default="status", choices=["on", "off", "status"])
     args = ap.parse_args()
+    if args.cmd == "awake":   # needs no queue: a session holds its keep-awake whatever the folder
+        if not awake:
+            sys.exit("awake.py is missing beside queue.py")
+        print({"on": awake.on, "off": awake.off, "status": awake.status}[args.what]())
+        return
     if getattr(args, "text", None):  # a table row is one line: flatten line breaks and pipes
         args.text = " ".join(args.text.replace("|", "/").split())
     q = Queue(args.root)
@@ -714,6 +765,11 @@ def main():
     elif args.cmd == "migrate":
         print("migrated" if q.migrate() else "already has the Pri column")
     elif args.cmd == "statusline":
+        # Running parts in bright white (the user, 2026-11-07: "when there is something running e.g. "HP: 49" now, we
+        # should make them highlight (the brighter white color, just like the current line)"). 97 is bright white; 0
+        # resets to the normal color, the one the model name has (2026-11-07: restoring dim made the rest "too dark").
+        def hi(t):
+            return f"\033[97m{t}\033[0m"
         rows = [r for r in q.rows() if r["n"] not in q.pinned()]
         hp_paused = [str(r["n"]) for r in rows if r["pri"] == "HP" and q.kind(r) == "paused"]
         st = q.current_state()
@@ -740,16 +796,15 @@ def main():
             mode = q.group_mode(pri)
             sign = {"running": "", "desk": "📝 desk ", "paused": "✋ PAUSED "}[mode]   # running: no sign (2026-10-29, as HP)
             names = "/".join(str(r["n"]) + ("✋" if q.kind(r) == "paused" and mode != "paused" else "") for r in open_)
-            return f"{pri}: {sign}{names}"
+            txt = f"{pri}: {sign}{names}"
+            return hi(txt) if mode == "running" and any(q.kind(r) == "active" for r in open_) else txt
         # MP shows only while it has open tasks; LP always (LP none)
         mp, lp = group("MP"), group("LP") or "LP none"
-        print(f"{hp}\t{mp + '  ' if mp else ''}{lp}")
+        print(f"{hi(hp) if st.startswith('running') else hp}\t{mp + '  ' if mp else ''}{lp}")
     elif args.cmd == "wts":
         rows = [r for r in q.rows()]
         pinned = q.pinned()
-        caf = caffeinated()
-        print(q.window() + ("" if caf is None
-                            else f" · caffeinate {'on' if caf else 'off'}"))
+        print(q.window() + awake_text())
         print()
         b = "" if args.term else "**"
         only = args.only or list(PRIS)
@@ -766,7 +821,7 @@ def main():
         for r in rows:
             if r["n"] in pinned and not args.only:
                 print()
-                tail = (" then the lead stops caffeinate."
+                tail = (" Then the lead runs `queue.py awake off`."
                         if caffeinated() is not None else "")
                 print(f"{r['n']} END: when all three tables are empty, \"queue empty\".{tail}")
 

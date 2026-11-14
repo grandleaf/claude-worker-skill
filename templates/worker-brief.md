@@ -53,8 +53,9 @@ status table takes its sign from those first words, and any other opening reads 
 
 You and the main window share the files and the built app. The user opens the app often.
 - **One build or app run at a time.** Before a build or a capture, take the shared-window lock as a file that says
-  what you are doing: `until [ ! -e <lock> ]; do sleep 10; done; echo "worker build $(date)" > <lock>` (or
-  `worker capture`), and remove it after. Before you start, wait until no app and no build is running; never kill what
+  what you are doing: `for i in $(seq 1 180); do [ ! -e <lock> ] && break; sleep 10; done; [ -e <lock> ] && { echo "lock still held: $(cat <lock>)"; exit 9; }; echo "worker build $(date)" > <lock>`
+  (or `worker capture`), and remove it after. The wait gives up after 30 minutes and says who holds the lock: then
+  write that in your State and tell the lead; never loop forever. Before you start, wait until no app and no build is running; never kill what
   you did not start.
 - **Hold the lock only while the app is open or a build replaces it**: one run per take, released the moment the app
   closes, never across reading output, editing or thinking, so the lead's showings get in between your runs. A script
@@ -65,6 +66,15 @@ You and the main window share the files and the built app. The user opens the ap
   create.
 - **Never edit `.claude/settings*.json`.**
 - **Tests:** only the ones related to your change, with a filter; never the whole suite.
+- **Background jobs and wait loops** (the user, 2026-11-13: a finished task's agent left a job waiting forever for
+  lines that never came, so the task still showed as live):
+  1. **Every wait loop has a way out:** a timeout plus the failure case, e.g.
+     `for i in $(seq 1 60); do <check> && break; sleep 5; done`, or break on the job's `rc=` line. Never a bare
+     `until <check>; do sleep 5; done`. When the loop gives up, look at why; do not go on as if it had passed.
+  2. **Before handing back, stop what you started:** TaskStop every background job and every Monitor of yours that
+     is still running (list them first). Your report says "no background job left".
+  3. **A Monitor that expires with no events means the condition never came true.** Check what happened before
+     assuming the job is done, and never report a result you did not see printed.
 
 ## 4. The user's standing rules
 
@@ -90,6 +100,7 @@ Your final message for each task is read by the lead. Keep it short and exact:
 3. What you could not judge or did not check.
 4. Any open decision, with your recommendation.
 5. Faults you saw and left alone.
+6. One line: every background job and Monitor of yours is stopped (or which is not, and why).
 
 **Capture only what the change needs.** A capture holds the shared window in real time: start each run just before
 the moment, stop after it, shoot only the runs the change affects, fine steps only across the motion judged, and reuse

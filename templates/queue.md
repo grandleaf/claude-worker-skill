@@ -19,11 +19,12 @@ before END). push: HP worker idle, at the top; busy, just after the task in prog
 push override (HP): the task in progress is paused at its next clean point and the new task starts at once; the
 paused task resumes right after it.
 
-**Caffeinate (macOS only):** queuing any task starts `caffeinate -dims` if it is off; task 999 (END) stops it.
+**Keep awake (macOS only):** the lead runs `queue.py awake on` when an agent starts and `queue.py awake off` when none
+works (task 999, END, too); each Claude session holds its own keep-awake and stops only its own.
 Where the command does not exist -- Linux, or a server that never sleeps -- there is nothing to keep awake and this
 line does not apply.
 **Model:** every task runs on the worker's model unless the user explicitly puts a task on another model.
 
 | # | Pri | Task | State | Accepted |
 |---|---|---|---|---|
-| 999 | — | **END** (a fixed number, always the last row): when all three tables (HP, MP and LP) are empty, report "queue empty" to the lead, who stops caffeinate | standing | n/a |
+| 999 | — | **END** (a fixed number, always the last row): when all three tables (HP, MP and LP) are empty, report "queue empty" to the lead, who runs `queue.py awake off` | standing | n/a |
