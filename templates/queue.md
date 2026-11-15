@@ -6,11 +6,13 @@ State cell of a row**; everything else is the lead's (`~/.claude/skills/worker/s
 **Approvals and reviews are the lead's.** Wherever a task says the user approves, decides or sees something before
 work goes on, read "the lead": hand back to the lead, who reviews and decides, and logs its taste calls in the notes.
 
-**Accepted** is the user's word only: `✔ <date> (the user: "<words>")`. The lead's review doesn't count. `wts` leaves
+**Accepted** is the user's word only: `✔ <date> <time> (the user: "<words>")`. The lead's review doesn't count. `wts` leaves
 out accepted rows and `n/a` rows (withdrawn, superseded, folded into another task).
 
-**Two tables.** The Pri column: **HP** rows are the short tasks the background worker does one at a time; **LP** rows
-are long tasks, each on its own agent. One numbering for both. HP rows first, then LP rows, then END. The LP group's
+**The tables.** The Pri column: **HP** rows are the short tasks the background worker does one at a time; **LP** rows
+are long tasks, each on its own agent. **AG** rows are the lead's own agents (started by the lead outside the queue,
+one per row, named `ag<N>`; no limit; accepting one stops its agent). One numbering for all. HP rows first, then MP,
+then LP, then AG, then END. The LP group's
 mode is in `lp_mode` (running / desk = desk-only, kept off the shared window / paused); LP agents read it before every
 step that takes the window, and never write `state` (the HP worker's).
 
@@ -27,4 +29,4 @@ line does not apply.
 
 | # | Pri | Task | State | Accepted |
 |---|---|---|---|---|
-| 999 | — | **END** (a fixed number, always the last row): when all three tables (HP, MP and LP) are empty, report "queue empty" to the lead, who runs `queue.py awake off` | standing | n/a |
+| 999 | — | **END** (a fixed number, always the last row): when the HP, MP and LP tables are empty (AG agents don't count), report "queue empty" to the lead, who runs `queue.py awake off` | standing | n/a |

@@ -4,10 +4,12 @@ A [Claude Code](https://claude.com/claude-code) skill. Your main session becomes
 it files your requests as numbered tasks in a queue, starts a fresh background agent (a **worker**) for each one,
 reviews what comes back, and shows you the result. You keep working with the lead while the workers run.
 
-- **Three tables:** HP (short tasks, one or a few workers at a time, in order), MP and LP (mid-sized and long tasks,
-  each on its own agent). One numbering for all; a task keeps its number when it moves.
+- **Four tables:** HP (short tasks, one or a few workers at a time, in order), MP and LP (mid-sized and long tasks,
+  each on its own agent), and AG, the lead's own agents (one row each, named `ag<N>`; no limit; accepting one stops
+  its agent). One numbering for all; a task keeps its number when it moves.
 - **Your words drive it:** `worker: <task>`, `push <task>`, `push override <task>`, `pause the worker`, `resume`,
-  `accept N`, `LP <task>`, `pause LP`, `LP desk-only`, `show me N`, and `wts` for the status table.
+  `accept N`, `reopen N`, `LP <task>`, `AG <task>`, `pause LP`, `LP desk-only`, `show me N`, `wts` for the status
+  table and `wts hx` for the history (the closed tasks, newest first).
 - **One shared window:** builds, captures and app runs take a lock, so the agents and your own showings never collide.
   The lock is held only while the app is open, so a showing gets in between a worker's runs.
 - **A fresh agent per task**, so contexts stay small; the task's notes file is the hand-off for a redo.

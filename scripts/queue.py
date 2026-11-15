@@ -7,12 +7,14 @@ The queue is a markdown table in <project>/.autopilot/worker/queue.md, one row p
     |---|---|---|---|---|
     | 41 | HP | <the task, the user's words in quotes, addenda> | done 14:20 (`notes.md`) | ✔ 2026-10-17 (the user: "...") |
 
-Three tables in one file. **HP** (high priority): the short tasks the background worker does one at a time and the
+Four tables in one file. **HP** (high priority): the short tasks the background worker does one at a time and the
 user checks one by one. **MP** (medium priority): mid-sized tasks, each on its own agent, ranked between the two: they
 start before LP tasks and come before them for the shared window. **LP** (low priority): long tasks (a stage rebuild),
-each on its own agent. MP and LP each have a group mode (running / desk-only / paused) the user sets for the whole
-table. One numbering for all: a task keeps its number when it moves between tables. The file keeps the HP rows first,
-then MP, then LP, then the pinned tail (999, END, last). Rows without a Pri cell (an older queue) count as HP.
+each on its own agent. **AG** (the lead's own agents, 2026-11-14): agents the lead starts itself, outside the queue,
+one per row, named ag<N> (the user: "I want to make them a home in the WTS ... they should work like a normal WTS
+task"); no limit and no group mode, and they do not keep the queue open (END) or the Mac awake. MP and LP each have a
+group mode (running / desk-only / paused) the user sets for the whole table. One numbering for all: a task keeps its number when it moves between tables. The file keeps the HP rows first,
+then MP, then LP, then AG, then the pinned tail (999, END, last). Rows without a Pri cell (an older queue) count as HP.
 
 Settings live in <project>/.autopilot/worker/config.json (see templates/config.json): the shared-window lock, the app's
 process name, the worker's model, and the pinned tail (e.g. [999]).
@@ -27,11 +29,14 @@ command a session runs (`! wts` too); `--session ID` overrides it. config.json's
 writes them. A session counts as live while its Claude process (CLAUDE_PID) runs.
 
 Commands (run from the project root, or pass --root):
-  queue.py add [--pri HP|MP|LP] --mode append|push|override --text "..."   file a new task (HP by default)
+  queue.py add [--pri HP|MP|LP|AG] --mode append|push|override --text "..."   file a new task (HP by default; AG
+                                                          records this session as the agent's owner)
   queue.py addendum N --text "..."                        append a dated addendum to task N's Task cell
   queue.py state N --text "..."                           set task N's State cell (the lead's own edits)
   queue.py accept N [N ...] --words "..."                 mark tasks accepted by the user
-  queue.py pri N HP|MP|LP                                 move task N to another table (its number stays)
+  queue.py close N [N ...] --why "..."                    Accepted n/a (<why>): withdrawn, cancelled, folded into M
+  queue.py reopen N [N ...]                               undo an accept or a close: the row is back in its table
+  queue.py pri N HP|MP|LP|AG                                move task N to another table (its number stays)
   queue.py worker running [N ...] | paused | stopped      this session's HP state (its own tasks, up to its HP limit);
                                                           the shared `state` file becomes the union of live sessions;
                                                           the running rows move to the top of their table, in that order
@@ -41,10 +46,12 @@ Commands (run from the project root, or pass --root):
   queue.py limit reset [hp|mp|lp ...]                     back to the defaults in config.json
   queue.py mp running | desk | paused                     write the MP group's mode
   queue.py lp running | desk | paused                     write the LP group's mode
-  queue.py wts [--all]                                    the window line, then the HP, MP and LP tables
+  queue.py wts [--all]                                    the window line, then the HP, MP, LP and AG tables
+  queue.py wts hx [--all]                                 the closed tasks (HX, history; `wts history` too) (accepted or n/a), newest first: the last
+                                                          20, or every one
   queue.py order                                          the pending run order, one line each
   queue.py window                                         who holds the shared window
-  queue.py statusline                                     the HP part, then the MP and LP parts (tab-separated)
+  queue.py statusline                                     the HP part, then the MP, LP and AG parts (tab-separated)
   queue.py awake on | off | status                        keep the Mac awake while this session's agents work: each
                                                           Claude session holds its own and stops only its own (awake.py)
 
@@ -68,7 +75,8 @@ import subprocess
 import sys
 
 ROW = re.compile(r"^\| (\d+) \|")
-PRIS = ("HP", "MP", "LP")
+PRIS = ("HP", "MP", "LP", "AG")
+LIMITED = ("HP", "MP", "LP")            # AG has no limit: each of the lead's own agents is one the user asked for
 LP_MODES = {"running": "⏩ running", "desk": "📝 desk-only", "paused": "✋ PAUSED"}   # the MP and LP groups' modes
 LIMIT_KEYS = {"HP": "hp_parallel", "MP": "mp_parallel", "LP": "lp_parallel"}       # config.json: a new session's defaults
 
@@ -120,6 +128,15 @@ class Queue:
         self.titles["_reviewed"] = sorted(self.reviewed)
         with open(self.titles_path, "w") as f:
             json.dump(self.titles, f, indent=1, ensure_ascii=False)
+
+    def set_owner(self, n, sid):
+        """The Claude session that started an AG row's agent (an agent lives in one lead session)."""
+        self.titles.setdefault("_session", {})[str(n)] = sid
+        with open(self.titles_path, "w") as f:
+            json.dump(self.titles, f, indent=1, ensure_ascii=False)
+
+    def owner(self, n):
+        return (self.titles.get("_session") or {}).get(str(n), "")
 
     def set_title(self, n, text):
         self.titles[str(n)] = text.strip()
@@ -381,6 +398,8 @@ class Queue:
         return out
 
     def default_limit(self, pri):
+        if pri not in LIMIT_KEYS:
+            return None
         v = self.cfg.get(LIMIT_KEYS[pri])
         if v is None:
             return 1 if pri == "HP" else None
@@ -388,6 +407,8 @@ class Queue:
 
     def limit(self, pri, sid):
         """This session's limit for a table, and where it comes from ("this session" or "default")."""
+        if pri not in LIMITED:
+            return None, "no limit"
         lim = self.read_session(sid).get("limits", {}) if sid else {}
         if pri in lim:
             return lim[pri], "this session"
@@ -483,7 +504,7 @@ SIGN = {"active": "⏩", "queued": "⏳", "paused": "✋", "parked": "✋", "ask
 
 def runs_on(q, r):
     m = re.findall(r"on the ([A-Z][\w .]*?) model", r["task"])  # the last mention wins (an addendum may move it)
-    return m[-1] if m else q.cfg.get("worker_model", "the worker")
+    return m[-1] if m else ("own agent" if r["pri"] == "AG" else q.cfg.get("worker_model", "the worker"))
 
 
 def _load_awake():
@@ -559,6 +580,11 @@ def hp_line(q):
         (f" {st.split(' ', 1)[1]}" if st.startswith("running ") else "")
 
 
+def ag_line(q):
+    """AG's legend, as the other tables': running while one of its agents works, else idle (it has no mode or limit)."""
+    return "⏩ running" if any(r["pri"] == "AG" and q.kind(r) == "active" for r in q.rows()) else "💤 idle"
+
+
 def short_status(q, r):
     """The State cell cut to its head (before the first ": "), with the lead's review and what waits on it."""
     k = q.kind(r)
@@ -587,7 +613,7 @@ def title_of(q, r):
     if t:
         return t
     task = re.sub(r"\*\*|`", "", r["task"])
-    task = re.sub(r"^(Queued|PUSHED|PUSH OVERRIDE)[^:]*:\s*", "", task)
+    task = re.sub(r"^(Queued|PUSHED|PUSH OVERRIDE)[^(:]*(?:\([^)]*\))?:\s*", "", task)   # "(2026-11-14 20:37):": the time's colon is not the label's end
     return task if len(task) <= 60 else task[:57] + "..."
 
 
@@ -614,7 +640,55 @@ def width(s):
 
 def table(q, rows, show_all, term=False):
     head = ("#", "Task", "Runs on", "Status", "Accepted")
-    body = table_rows(q, rows, show_all) or [("—", "(nothing open)", "", "", "")]
+    grid(head, table_rows(q, rows, show_all) or [("—", "(nothing open)", "", "", "")], term)
+
+
+RE_ACC_OK = re.compile(r"✔\s*(\d{4}-\d\d-\d\d)?(?:\s+(\d\d:\d\d))?\s*(?:\((?:the user:\s*)?(.*)\))?\s*$", re.S)
+RE_ACC_NA = re.compile(r"n/a\s*(?:\((.*)\))?\s*$", re.S | re.I)
+RE_STAMP = re.compile(r"(?:^|,\s*)(\d{4}-\d\d-\d\d)(?:\s+(\d\d:\d\d))?\s*$")
+
+
+def history_rows(q):
+    """The closed tasks (accepted, or n/a: withdrawn, cancelled, folded into another), newest first (the user,
+    2026-11-14: "any accepted, or aborted task goes to there"). Each: {n, pri, title, ok, date, time, why}: ok is True
+    for an accept, why the user's words or the n/a reason. Ordered by the date and time the Accepted cell carries
+    (a time since 2026-11-14), then by number; a row with no date (an older n/a) comes after every dated one."""
+    out = []
+    for r in q.rows():
+        if r["n"] in q.pinned() or q.kind(r) != "closed":
+            continue
+        acc = r["acc"].strip()
+        date = time_ = None
+        if "✔" in acc:
+            m = RE_ACC_OK.search(acc)
+            date, time_, why = (m.group(1), m.group(2), (m.group(3) or "").strip()) if m else (None, None, "")
+            why, ok = why.strip('"“” '), True
+        else:
+            m = RE_ACC_NA.match(acc)
+            why, ok = ((m.group(1) or "") if m else acc).strip(), False
+            st = RE_STAMP.search(why)
+            if st:
+                date, time_, why = st.group(1), st.group(2), why[:st.start()].strip(" ,")
+        out.append({"n": r["n"], "pri": r["pri"], "title": title_of(q, r), "ok": ok, "date": date, "time": time_, "why": why})
+    out.sort(key=lambda h: (h["date"] is not None, h["date"] or "", h["time"] or "", h["n"]), reverse=True)
+    return out
+
+
+def print_history(q, show_all, term=False):
+    hist = history_rows(q)
+    shown = hist if show_all else hist[:20]
+    b = "" if term else "**"
+    more = f" · the newest {len(shown)} (`wts hx --all`: every one)" if len(shown) < len(hist) else ""
+    print(f"{b}HX{b} · history · {len(hist)} closed{more}")
+    print()
+    def outcome(h):
+        why = h["why"] if len(h["why"]) <= 40 else h["why"][:37] + "..."
+        return (f'✔ "{why}"' if why else "✔") if h["ok"] else (f"n/a: {why}" if why else "n/a")
+    body = [(str(h["n"]), h["pri"], h["title"], " ".join(x for x in (h["date"], h["time"]) if x) or "—", outcome(h)) for h in shown]
+    grid(("#", "Pri", "Task", "Closed", "Outcome"), body or [("—", "", "(nothing closed yet)", "", "")], term)
+
+
+def grid(head, body, term=False):
     if not term:
         print("| " + " | ".join(head) + " |")
         print("|---|---|---|---|---|")
@@ -651,6 +725,8 @@ def main():
     b = sub.add_parser("addendum"); b.add_argument("n", type=int); b.add_argument("--text", required=True)
     s = sub.add_parser("state"); s.add_argument("n", type=int); s.add_argument("--text", required=True)
     c = sub.add_parser("accept"); c.add_argument("n", type=int, nargs="+"); c.add_argument("--words", required=True)
+    cl = sub.add_parser("close"); cl.add_argument("n", type=int, nargs="+"); cl.add_argument("--why", required=True)
+    ro = sub.add_parser("reopen"); ro.add_argument("n", type=int, nargs="+")
     p = sub.add_parser("pri"); p.add_argument("n", type=int); p.add_argument("pri", choices=PRIS)
     tp = sub.add_parser("top"); tp.add_argument("n", type=int, nargs="+")
     w = sub.add_parser("worker"); w.add_argument("what", choices=["running", "paused", "stopped"]); w.add_argument("n", nargs="*")
@@ -658,7 +734,8 @@ def main():
     l = sub.add_parser("lp"); l.add_argument("mode", choices=list(LP_MODES))
     mp = sub.add_parser("mp"); mp.add_argument("mode", choices=list(LP_MODES))
     t = sub.add_parser("wts"); t.add_argument("--all", action="store_true")
-    t.add_argument("only", nargs="*", type=str.upper, choices=list(PRIS), help="show only these tables (wts hp, wts mp lp)")
+    t.add_argument("only", nargs="*", type=str.upper, choices=list(PRIS) + ["HX", "HISTORY"],
+                   help="show only these tables (wts hp, wts mp lp); hx (or history): the closed tasks, newest first")
     t.add_argument("--term", action="store_true", help="aligned plain text for a terminal (the `wts` shell command)")
     sub.add_parser("order")
     sub.add_parser("window")
@@ -681,6 +758,8 @@ def main():
         n, act = q.add(args.mode, args.text, args.pri)
         if args.title:
             q.set_title(n, args.title)
+        if args.pri == "AG" and sid:
+            q.set_owner(n, sid)
         print(f"filed task {n} ({args.pri}, {args.mode})" + (f"; task {act['n']} paused for it" if args.mode == "override" and act else ""))
         print_order(q)
     elif args.cmd == "reviewed":
@@ -698,7 +777,7 @@ def main():
                   + ", ".join(f'"{h}"' for h, _ in Queue.HEADS) + ' (optionally after "redo")')
     elif args.cmd == "accept":
         for n in args.n:
-            q.set_row(q.find(n), acc=f'✔ {today()} (the user: "{args.words}")')
+            q.set_row(q.find(n), acc=f'✔ {today()} {now_hm()} (the user: "{args.words}")')   # the time orders History (2026-11-14)
         q.save(); print("accepted: " + ", ".join(map(str, args.n)))
         # config "on_accept": a command run with the accepted numbers (e.g. 2026-10-30: clean the task's scratch
         # capture frames once the user accepts it; the user: "yes, do both")
@@ -707,6 +786,25 @@ def main():
             import shlex, subprocess
             r = subprocess.run(shlex.split(hook) + [str(n) for n in args.n], cwd=q.root, capture_output=True, text=True)
             print((r.stdout or r.stderr).strip())
+    elif args.cmd == "close":
+        why = " ".join(args.why.replace("|", "/").split())
+        for n in args.n:
+            q.set_row(q.find(n), acc=f"n/a ({why}, {today()} {now_hm()})")
+        q.save(); print(f"closed (n/a, {why}): " + ", ".join(map(str, args.n)))
+    elif args.cmd == "reopen":
+        # the user, 2026-11-14: a History of closed tasks makes a mistaken accept easy to spot; this undoes it
+        done, left = [], []
+        for n in args.n:
+            r = q.find(n)
+            if q.kind(r) != "closed":
+                left.append(n)
+                continue
+            q.set_row(r, acc="—")
+            done.append(f"{n} ({r['pri']}: {short_status(q, dict(r, acc='—')).strip()})")
+        if done:
+            q.save()
+        print("reopened, back in their tables: " + (", ".join(done) or "none")
+              + (f"; not closed, left as they are: {', '.join(map(str, left))}" if left else ""))
     elif args.cmd == "pri":
         q.move(args.n, args.pri); print(f"{args.n} is now {args.pri}"); print_order(q)
     elif args.cmd == "top":
@@ -733,8 +831,8 @@ def main():
         d = q.read_session(sid) if sid else {}
         lim = d.setdefault("limits", {})
         if words[:1] == ["reset"]:
-            for pri in ([w.upper() for w in words[1:]] or list(PRIS)):
-                if pri not in PRIS:
+            for pri in ([w.upper() for w in words[1:]] or list(LIMITED)):
+                if pri not in LIMITED:
                     sys.exit(f"unknown table {pri.lower()}: use hp, mp or lp")
                 lim.pop(pri, None)
             q.write_session(sid, d)
@@ -743,7 +841,7 @@ def main():
                 sys.exit("give pairs: hp N [mp N] [lp N]")
             for pri, val in zip(words[::2], words[1::2]):
                 pri = pri.upper()
-                if pri not in PRIS:
+                if pri not in LIMITED:
                     sys.exit(f"unknown table {pri.lower()}: use hp, mp or lp")
                 if val in ("none", "-", "unlimited"):
                     lim[pri] = None
@@ -755,7 +853,7 @@ def main():
         def show(pri):
             n, src = q.limit(pri, sid)
             return f"{pri} {'no limit' if n is None else n} ({src})"
-        print(f"limits for {'session ' + sid[:8] if sid else 'no session (defaults)'}: " + " · ".join(show(p) for p in PRIS))
+        print(f"limits for {'session ' + sid[:8] if sid else 'no session (defaults)'}: " + " · ".join(show(p) for p in LIMITED))
     elif args.cmd in ("lp", "mp"):
         q._write(f"{args.cmd}_mode", f"{args.mode} {today()} {now_hm()}"); print(f"{args.cmd.upper()} mode: " + LP_MODES[args.mode])
     elif args.cmd == "window":
@@ -793,37 +891,48 @@ def main():
             open_ = [r for r in rows if r["pri"] == pri and q.kind(r) in ("active", "paused", "parked", "queued", "other")]
             if not open_:
                 return ""
-            mode = q.group_mode(pri)
+            mode = q.group_mode(pri) if pri in ("MP", "LP") else "running"
             sign = {"running": "", "desk": "📝 desk ", "paused": "✋ PAUSED "}[mode]   # running: no sign (2026-10-29, as HP)
             names = "/".join(str(r["n"]) + ("✋" if q.kind(r) == "paused" and mode != "paused" else "") for r in open_)
             txt = f"{pri}: {sign}{names}"
             return hi(txt) if mode == "running" and any(q.kind(r) == "active" for r in open_) else txt
-        # MP shows only while it has open tasks; LP always (LP none)
-        mp, lp = group("MP"), group("LP") or "LP none"
-        print(f"{hi(hp) if st.startswith('running') else hp}\t{mp + '  ' if mp else ''}{lp}")
+        # MP and AG show only while they have open tasks; LP always (LP none)
+        mp, lp, ag = group("MP"), group("LP") or "LP none", group("AG")
+        print(f"{hi(hp) if st.startswith('running') else hp}\t{mp + '  ' if mp else ''}{lp}{'  ' + ag if ag else ''}")
     elif args.cmd == "wts":
         rows = [r for r in q.rows()]
         pinned = q.pinned()
+        b = "" if args.term else "**"
+        only = ["HX" if x == "HISTORY" else x for x in args.only] or list(PRIS)   # HX: history's shorthand (2026-11-14)
+        if only == ["HX"]:
+            print_history(q, args.all, args.term)
+            return
         print(q.window() + awake_text())
         print()
-        b = "" if args.term else "**"
-        only = args.only or list(PRIS)
         for k, pri in enumerate(p for p in PRIS if p in only):
             if k:
                 print()
             n, src = q.limit(pri, sid)
-            cap = f" · max {'none' if n is None else n} ({src if sid else 'default; no session'})"   # per session (2026-11-07)
+            cap = f" · max {'none' if n is None else n} ({src if sid else 'default; no session'})" if pri in LIMITED else ""   # per session (2026-11-07)
             others = q.others_running(sid) if pri == "HP" and sid else []
-            print(f"{b}{pri}{b} · " + (f"the worker: {hp_line(q)}" if pri == "HP" else LP_MODES[q.group_mode(pri)]) + cap
+            print(f"{b}{pri}{b} · " + (f"the worker: {hp_line(q)}" if pri == "HP" else ag_line(q) if pri == "AG" else LP_MODES[q.group_mode(pri)]) + cap
                   + (f" · other sessions run {', '.join(others)}" if others else ""))
             print()
             table(q, [r for r in rows if r["pri"] == pri and r["n"] not in pinned], args.all, args.term)
+        if "HX" in only:
+            print()
+            print_history(q, args.all, args.term)
+        elif not args.only:
+            n_closed = len(history_rows(q))
+            if n_closed:
+                print()
+                print(f"HX (history): {n_closed} closed (`wts hx`)")
         for r in rows:
             if r["n"] in pinned and not args.only:
                 print()
                 tail = (" Then the lead runs `queue.py awake off`."
                         if caffeinated() is not None else "")
-                print(f"{r['n']} END: when all three tables are empty, \"queue empty\".{tail}")
+                print(f"{r['n']} END: when the HP, MP and LP tables are empty, \"queue empty\" (AG agents don't count).{tail}")
 
 
 def print_order(q):

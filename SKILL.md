@@ -112,7 +112,7 @@ judge needs no advisor. Anything that moves is judged from a clip from round 1, 
 2026-10-25, task 169: 166 passed on stills and failed at the show); say so in both briefs. The template for the advisor's prompt is the adv128/adv129 prompt: the job and the user's
 words, how to see it, the rules, round 0, the rounds, the lead line, the final report.
 
-## 1b. Three tables: HP, MP and LP
+## 1b. Three tables: HP, MP and LP (and AG, section 1c)
 
 The queue has a **Pri** column. **HP** (high priority): short tasks the one background worker does in order, which the
 user checks one by one. **MP** (medium priority, added 2026-10-18): mid-sized tasks, too big for the worker's queue but
@@ -138,6 +138,25 @@ send `running` or work to one that should go on). LP agents never write the HP w
 and copy data into the built app only right after a build when code has changed since (`sync_data`-style scripts
 should refuse otherwise): one unknown key can stop the app from loading.
 
+## 1c. AG: the lead's own agents
+
+The user, 2026-11-14: "I want to make them a home in the WTS, since most time i use the wTS table ... they should work
+like a normal wTS task ... I also want to do the things like \"accept\", so them will be removed from the WTS table."
+**Every agent you start yourself outside HP, MP and LP gets an AG row first** (a task's own helpers, such as an
+advisor, do not: they belong to their task). The fourth table, after LP, in the one numbering:
+1. File it: `Q add --pri AG --mode append --title "a few words" --text "<the user's words in quotes>, what it is for.
+   Runs as a fresh agent on the <Model> model."`; it records this session as the agent's owner.
+2. Start it named **`ag<N>`** with the description **"AG N: <what>"** (ccprobe and the status line tie it to its row
+   by that name), and set its State: `Q state N --text "in progress <time>: …"`.
+3. Keep its State current when it reports (`done …`, `waiting …`); an agent that only waits by design (a placeholder)
+   stays `in progress`.
+
+The differences from MP and LP: **no limit** and **no group mode** (each agent is one the user asked for); **off the
+shared window** unless its row says otherwise (then after LP); **they never count for the keep-awake** (`Q awake`) **nor
+for "queue empty"** (END). **`accept N` on an AG row stops its agent first** if it is still alive (the user: "accept
+stops the agent"): a clean stop it has (a stop file, a message), else `TaskStop`; then `Q accept`. Say in one line that
+you stopped it.
+
 ## 2. The user's words
 
 | The user says | Where it goes | What you do |
@@ -149,6 +168,12 @@ should refuse otherwise): one unknown key can stop the app from loading.
 | `wts` | — | The status table (section 3). |
 | `accept N` / `N accepted` / "accept all the X ones" | — | `Q accept N … --words "<their words>"`; they leave `wts`. For "all the X ones", list which rows you took and which you left. |
 | `LP <task>`, "a long task" | **LP table**, its tail. | `Q add --pri LP --mode append …`; start its own agent (or queue it). |
+| `AG <task>`, "spawn an agent to …" (not the worker) | **AG table**, its tail. | Section 1c: `Q add --pri AG …`, then its agent `ag<N>`. |
+| `reopen N` | — | `Q reopen N`: undoes an accept or a close (a mistaken one); the row is back in its table with its State. |
+| `wts hx` / `wts history` | — | `Q wts hx` (HX, the history: the last 20 closed, newest first; `--all` for every one): paste it as it is. |
+| `accept N` on an AG row | — | Stop its agent if it is alive, then `Q accept N`; it leaves `wts` (section 1c). |
+| `stop N` (AG) | — | Stop its agent; `Q state N --text "paused <time>: stopped by the user"`; the row stays until accepted. |
+| `cancel N` (AG) | — | Stop its agent; `Q close N --why "cancelled by the user"`: it leaves `wts` without a ✔. |
 | `HP N` / `LP N` | Moves task N to that table. | `Q pri N HP|LP`; tell the agents concerned. |
 | `pause LP` / `LP desk-only` / `resume LP` | — | `Q lp paused|desk|running`; message every LP agent. |
 | `pause N` | — | That task only: PAUSE to the agent running it; the HP worker goes on to the next HP task. |
@@ -161,7 +186,7 @@ should refuse otherwise): one unknown key can stop the app from loading.
 Every row is written by you, in the user's own words first (in quotes), then what they mean in plain terms, then how
 it will be checked and what picture sheet to make. One row, one outcome. A follow-up on an open task is an addendum,
 not a new task. When a new note supersedes an open task, fold the old one in (`Q state N --text "folded into M"` and
-set its Accepted to `n/a (folded into M)`).
+`Q close N --why "folded into M"`).
 
 **Keep the Mac awake exactly while this session's agents work** (macOS; the user, 2026-11-05: "when there's nothing
 in the WTS to do, e.g. all paused, or the max parallel set to 0 and all task can be run are finished, we need turn off
@@ -169,7 +194,7 @@ the caffinate"). **`Q awake on`** whenever an agent starts or resumes: queuing a
 a table's limit (`Q limit`). **`Q awake off`** as soon as none of this session's agents is working: all three tables
 paused and every agent confirmed paused; the limits at 0 and the last running agent finished; or "queue empty". After
 every agent's final report, a pause, or a limit change, check: any worker, MP/LP agent or advisor still working (an
-agent "waiting on its own background work" counts as working: section 6)? If
+agent "waiting on its own background work" counts as working: section 6; AG agents never count: section 1c)? If
 none, `Q awake off`. Queuing a task that cannot start (tables paused or at 0) does not turn it on. `Q awake` shows who
 holds one. **Each Claude session holds its own and stops only its own** (the user, 2026-11-08: "when multiple claude
 session turn on or turn off caffinate, that will cause race condition"): `awake on` starts a `caffeinate -dims -w <this
