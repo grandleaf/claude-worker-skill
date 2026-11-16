@@ -62,30 +62,46 @@ except Exception:
 # ccprobe web interface"): Claude Code gives rate_limits only to the status line, so the latest goes to
 # ~/.cache/ccprobe/rate-limits.json, written when it changes or once a minute (the file time says it is fresh).
 # Every session writes it, and an idle one still passes on the figure from its last reply (two days old, say), so
-# each window keeps the newest reading: the later reset, and for the same reset the higher figure (use only grows
-# inside a window). A window whose reset has passed is dropped.
+# each window keeps the newest reading: each is stamped `seen_at`, when its session last wrote its transcript (the
+# figure comes from the headers of that reply), and the newer one wins; else the later reset. Until 2026-11-15 the same reset
+# kept the higher figure (use only grows inside a window), but a weekly limit reset by hand keeps its reset time (the
+# user, 2026-11-15: "i have reset my weekly limit (include fable), but the UI doesn.t reflect that"), so the stale 100%
+# won. The usage rows plan_usage.py fetches (the figure of the server itself, as of their fetch) count as a reading too, for the
+# figure shown. A window whose reset has passed is dropped.
 try:
     rl = d.get("rate_limits")
     if isinstance(rl, dict) and rl:
-        import time
+        import time, sys
         rdir = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "ccprobe")
         rpath = os.path.join(rdir, "rate-limits.json")
+        now = time.time()
         def _n(v):
             return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
-        def _age(w):
-            return (_n(w.get("resets_at")), _n(w.get("used_percentage"))) if isinstance(w, dict) else (-1, -1)
+        def _wins(w, o):
+            """Does reading w replace o? The same reset (an hour apart at most): the newer; else the later reset."""
+            if not isinstance(o, dict):
+                return True
+            a, b = _n(w.get("resets_at")), _n(o.get("resets_at"))
+            if abs(a - b) < 3600:
+                return _n(w.get("seen_at")) >= _n(o.get("seen_at"))
+            return a > b
+        try:
+            at = min(os.path.getmtime(d.get("transcript_path") or ""), now)
+        except (OSError, TypeError):
+            at = now
         try:
             with open(rpath) as f:
                 old = json.load(f).get("rate_limits")
             old = old if isinstance(old, dict) else {}
-            fresh = time.time() - os.path.getmtime(rpath) < 60
+            fresh = now - os.path.getmtime(rpath) < 60
         except Exception:
             old, fresh = {}, False
-        now = time.time()
-        new = {k: w for k, w in old.items() if not (0 < _n((w or {}).get("resets_at")) < now)}
+        new = {k: w for k, w in old.items() if isinstance(w, dict) and not (0 < _n(w.get("resets_at")) < now)}
         for k, w in rl.items():
-            if isinstance(w, dict) and _age(w) >= _age(new.get(k)) and not (0 < _n(w.get("resets_at")) < now):
-                new[k] = w
+            if isinstance(w, dict) and not (0 < _n(w.get("resets_at")) < now):
+                w = dict(w, seen_at=int(at))
+                if _wins(w, new.get(k)):
+                    new[k] = w
         if new != old or not fresh:
             os.makedirs(rdir, exist_ok=True)
             tmp = "%s.%d.tmp" % (rpath, os.getpid())
@@ -95,7 +111,21 @@ try:
             for x in os.listdir(rdir):
                 if x.endswith(".tmp") and now - os.path.getmtime(os.path.join(rdir, x)) > 600:
                     os.unlink(os.path.join(rdir, x))
-        nw = (new.get("seven_day") or {}).get("used_percentage")
+        shown = new.get("seven_day")
+        try:
+            sys.dont_write_bytecode = True
+            sys.path.insert(0, os.environ.get("SL_DIR") or ".")
+            import plan_usage
+            snap = plan_usage.load()
+            for r in snap.get("limits") or []:
+                if isinstance(r, dict) and r.get("kind") == "weekly_all" and isinstance(r.get("percent"), (int, float)):
+                    u = {"used_percentage": r["percent"], "resets_at": plan_usage.when(r.get("resets_at")) or 0,
+                         "seen_at": _n(snap.get("fetched_at"))}
+                    if not (0 < u["resets_at"] < now) and _wins(u, shown):
+                        shown = u
+        except Exception:
+            pass
+        nw = (shown or {}).get("used_percentage")
         if isinstance(nw, (int, float)):
             wk = str(int(round(nw)))
 except Exception:
