@@ -600,15 +600,21 @@ def short_status(q, r):
     if len(head) > 44:
         head = head[:41] + "..."
     extra = []
+    sign = SIGN.get(k, '')
     if k == "done":
         reviewed = r["n"] in q.reviewed or "Lead review" in r["task"]
         if "fix owed" in st:
             extra.append("small fix owed")
-        elif not reviewed:          # a reviewed done row says nothing more: that is the normal case
-            extra.append("to review")
+        elif not reviewed:
+            # the agent's work is done, the lead's review is not (the user, 2026-11-18: "only after the Lead's review, we
+            # can mark an agent or an worker as done"): 🔍 "to review <time>", and ✅ only once the lead marks it reviewed
+            sign = "🔍"
+            head = re.sub(r"^done\b", "to review", head)
+            if not head.startswith("to review"):
+                extra.append("to review")
     if "waiting for the window" in st and k != "done" and "waiting for the window" not in head:
         extra.append("waits for the window")
-    return f"{SIGN.get(k, '')} {head}" + (f" · {', '.join(extra)}" if extra else "")
+    return f"{sign} {head}" + (f" · {', '.join(extra)}" if extra else "")
 
 
 def title_of(q, r):

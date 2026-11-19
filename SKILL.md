@@ -253,7 +253,8 @@ as `Q wts`, its tables boxed with ┌┬┐ lines). Never fold rows into prose; 
 | `parked` / `waiting` / `hold` / `on hold` | ✋ | open |
 | `queued` | ⏳ | open |
 | anything else (an agent's own words) | ⏳ | open: **never hidden** (until 2026-10-18 such a row vanished) |
-| `done` | ✅ | after the open rows |
+| `done`, not yet reviewed by the lead | 🔍 (`to review <time>`) | after the open rows |
+| `done`, reviewed (`Q reviewed N`) | ✅ | after the open rows |
 | Accepted ✔ or n/a | — | left out (`wts --all` shows them) |
 
 - The cell shows the State's head (before the first ": "), plus "· to review" (a done row not yet reviewed; a reviewed one shows nothing), "· small fix owed"
