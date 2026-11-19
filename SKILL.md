@@ -36,7 +36,8 @@ Run the tool as `Q() { python3 ~/.claude/skills/worker/scripts/queue.py --root <
 
 If `<root>/.autopilot/worker/queue.md` does not exist:
 1. Copy `templates/queue.md` and `templates/config.json` into `<root>/.autopilot/worker/`; fill in `config.json`
-   (the shared-window lock path, the app's process name, the worker's model; `pinned_tail` lists task numbers that
+   (the shared-window lock path, or `"lock": ""` for a project with no shared window, such as a web tool tested in
+   its own headless browser, so the status line and `wts` leave the window out; the app's process name, the worker's model; `pinned_tail` lists task numbers that
    always stay last, at least `999`).
 2. Write the worker's brief from `templates/worker-brief.md`: fill in the repo, the user's standing rules, and the
    project's build, test, run and capture commands, each wrapped in the lock. Ask the user only for what you cannot

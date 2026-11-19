@@ -454,8 +454,9 @@ class Queue:
     # --- the shared window ------------------------------------------------------------------------------------
     def lock_paths(self):
         # "locks" (a list) since 2026-10-29: several window slots (e.g. unity.lock and unity2.lock); else "lock"
+        # "lock": "" says the project has no shared window (a web tool tested in its own headless browser): no slots
         rels = self.cfg.get("locks") or [self.cfg.get("lock", ".autopilot/run.lock")]
-        return [os.path.join(self.root, r) for r in rels]
+        return [os.path.join(self.root, r) for r in rels if r]
 
     def lock_text(self):
         held = [t for t in (self.one_lock_text(l) for l in self.lock_paths()) if t]
@@ -487,6 +488,8 @@ class Queue:
 
     def window(self):
         paths = self.lock_paths()
+        if not paths:
+            return ""   # no shared window: the wts heading and the status line leave it out
         if len(paths) == 1:
             who = self.lock_text()
             return f"🔴 Window: held by {who}" if who else "🟢 Window: free"
@@ -857,7 +860,7 @@ def main():
     elif args.cmd in ("lp", "mp"):
         q._write(f"{args.cmd}_mode", f"{args.mode} {today()} {now_hm()}"); print(f"{args.cmd.upper()} mode: " + LP_MODES[args.mode])
     elif args.cmd == "window":
-        print(q.window())
+        print(q.window() or "No shared window (config.json: \"lock\": \"\")")
     elif args.cmd == "order":
         print_order(q)
     elif args.cmd == "migrate":
@@ -907,7 +910,7 @@ def main():
         if only == ["HX"]:
             print_history(q, args.all, args.term)
             return
-        print(q.window() + awake_text())
+        print((q.window() + awake_text()).lstrip(" ·") or "No shared window")
         print()
         for k, pri in enumerate(p for p in PRIS if p in only):
             if k:

@@ -3,6 +3,7 @@
 # and context use. Project settings come from <cwd>/.autopilot/worker/config.json ("lock", "app_process"); without one
 # it shows only what it can find.
 #   🟢 window free | 🔴 window: <who> <what> <time>  (+ "app open" while the app runs)
+#   (none with "lock": "" in config.json: a project with no shared window)
 #   🔨 build: <who> since <time>  (only with "build_lock" in config.json: a build beside the app holds that lock)
 #   HP ⏩ N (building/capturing) | HP ✋ PAUSED at N | HP ■ stopped | HP idle   (the background worker, short tasks)
 #   LP ⏩ 52 74 | LP 📝 desk 52 | LP ✋ PAUSED 52 74 | LP none                          (long tasks; 📝 desk = kept off the window)
@@ -171,7 +172,9 @@ try:
         cfg = json.load(f)
 except Exception:
     pass
-print("MODEL=%s CWD=%s PCT=%s WK=%s WKR=%s FAB=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % (
+# "lock": "" (and no "locks"): the project has no shared window, so no window part (NOWIN=1)
+nowin = not cfg.get("locks") and cfg.get("lock", ".autopilot/run.lock") == ""
+print("NOWIN=%s MODEL=%s CWD=%s PCT=%s WK=%s WKR=%s FAB=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % ("1" if nowin else "",
     shlex.quote(m), shlex.quote(c), shlex.quote("" if pct is None else str(int(pct))), shlex.quote(wk), shlex.quote(wkr), shlex.quote(fab),
     shlex.quote(" ".join(cfg.get("locks") or [cfg.get("lock", ".autopilot/run.lock")])), shlex.quote(cfg.get("app_process", "")),
     shlex.quote(cfg.get("build_lock", ""))))
@@ -195,6 +198,8 @@ if [ -d "$CWD/.autopilot/worker" ]; then
   # LOCK_REL: one lock, or several window slots separated by spaces (config "locks"). The user, 2026-10-29: "dont do
   # combine status for the windows in the status bar. allocate two permanent slots for them": one part per slot, always
   # shown in the same place: "🔴 win0: hp202 capture since 22:50 (12s)" · "🟢 win1 free".
+  # A project with no shared window ("lock": "" in config.json, e.g. a web tool) has no window part at all
+  if [ -z "$NOWIN" ]; then
   nl=0; set -- ${LOCK_REL:-.autopilot/run.lock}; nslots=$#
   for rel in ${LOCK_REL:-.autopilot/run.lock}; do
     nl=$(( nl + 1 )); lock="$CWD/$rel"; one=""
@@ -216,6 +221,7 @@ if [ -d "$CWD/.autopilot/worker" ]; then
   done
   # A pending "reserve whichever frees first" (<locks' folder>/winres.any, e.g. a tools/winres.sh reserve any)
   set -- ${LOCK_REL:-.autopilot/run.lock}; [ -f "$CWD/$(dirname "$1")/winres.any" ] && parts+=("🔒 next free win → reserved")
+  fi
   # A build beside the app (config "build_lock") holds its own lock, not the window: "🔨 build: hp182 since 21:40"
   if [ -n "$BUILD_LOCK_REL" ] && [ -d "$CWD/$BUILD_LOCK_REL" ]; then
     bw=$(cat "$CWD/$BUILD_LOCK_REL/who" 2>/dev/null || echo "someone")
