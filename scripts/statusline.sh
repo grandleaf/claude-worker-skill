@@ -79,12 +79,16 @@ try:
         def _n(v):
             return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
         def _wins(w, o):
-            """Does reading w replace o? The same reset (an hour apart at most): the newer; else the later reset."""
+            """Does reading w replace o? The same reset (an hour apart at most): the newer, unless it is a point lower or
+            less (two sources rounding apart, as 99 here and 100 in the app on 2026-11-18; a reset drops it far more);
+            else the later reset."""
             if not isinstance(o, dict):
                 return True
             a, b = _n(w.get("resets_at")), _n(o.get("resets_at"))
             if abs(a - b) < 3600:
-                return _n(w.get("seen_at")) >= _n(o.get("seen_at"))
+                if _n(w.get("seen_at")) >= _n(o.get("seen_at")):
+                    return not (0 < _n(o.get("used_percentage")) - _n(w.get("used_percentage")) <= 1)
+                return 0 < _n(w.get("used_percentage")) - _n(o.get("used_percentage")) <= 1
             return a > b
         try:
             at = min(os.path.getmtime(d.get("transcript_path") or ""), now)
@@ -172,11 +176,13 @@ try:
         cfg = json.load(f)
 except Exception:
     pass
-# "lock": "" (and no "locks"): the project has no shared window, so no window part (NOWIN=1)
-nowin = not cfg.get("locks") and cfg.get("lock", ".autopilot/run.lock") == ""
+# "lock": "" or null (and no "locks"): the project has no shared window, so no window part (NOWIN=1); the lock_paths() of queue.py
+# reads it the same way (an empty entry is no slot)
+rels = [r for r in (cfg.get("locks") or [cfg.get("lock", ".autopilot/run.lock")]) if r]
+nowin = not rels
 print("NOWIN=%s MODEL=%s CWD=%s PCT=%s WK=%s WKR=%s FAB=%s LOCK_REL=%s APP_PROC=%s BUILD_LOCK_REL=%s" % ("1" if nowin else "",
     shlex.quote(m), shlex.quote(c), shlex.quote("" if pct is None else str(int(pct))), shlex.quote(wk), shlex.quote(wkr), shlex.quote(fab),
-    shlex.quote(" ".join(cfg.get("locks") or [cfg.get("lock", ".autopilot/run.lock")])), shlex.quote(cfg.get("app_process", "")),
+    shlex.quote(" ".join(rels)), shlex.quote(cfg.get("app_process", "")),
     shlex.quote(cfg.get("build_lock", ""))))
 EOF
 )"
