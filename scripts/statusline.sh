@@ -102,9 +102,28 @@ try:
         except Exception:
             old, fresh = {}, False
         new = {k: w for k, w in old.items() if isinstance(w, dict) and not (0 < _n(w.get("resets_at")) < now)}
+        # the server s own weekly figure (the usage rows, fetched in the last hour), to check a session against: one
+        # session passed on 10% for a week the others and the server had at 69% (the user, 2026-11-20: "my weekly shows
+        # 10, then 69 then 10, then 69"), and its readings were the newer every other minute. Inside one week use only
+        # grows, save a reset by hand, and the moving figure makes plan_usage fetch again within a minute, so a reading
+        # more than a point under the server s waits for the server to agree.
+        floor = None
+        try:
+            sys.dont_write_bytecode = True
+            sys.path.insert(0, os.environ.get("SL_DIR") or ".")
+            import plan_usage
+            snap = plan_usage.load()
+            if now - _n(snap.get("fetched_at")) < 3600:
+                for r in snap.get("limits") or []:
+                    if isinstance(r, dict) and r.get("kind") == "weekly_all" and isinstance(r.get("percent"), (int, float)):
+                        floor = (r["percent"], plan_usage.when(r.get("resets_at")) or 0)
+        except Exception:
+            pass
         for k, w in rl.items():
             if isinstance(w, dict) and not (0 < _n(w.get("resets_at")) < now):
                 w = dict(w, seen_at=int(at))
+                if k == "seven_day" and floor and abs(floor[1] - _n(w.get("resets_at"))) < 3600 and floor[0] - _n(w.get("used_percentage")) > 1:
+                    continue
                 if _wins(w, new.get(k)):
                     new[k] = w
         if new != old or not fresh:
@@ -118,8 +137,6 @@ try:
                     os.unlink(os.path.join(rdir, x))
         shown = new.get("seven_day")
         try:
-            sys.dont_write_bytecode = True
-            sys.path.insert(0, os.environ.get("SL_DIR") or ".")
             import plan_usage
             snap = plan_usage.load()
             for r in snap.get("limits") or []:
