@@ -324,6 +324,18 @@ that says "the user approves X" means you do. Log taste calls in the task's note
   show such jobs. A stuck wait also means the agent may have reported a check it never saw finish: rerun that check
   yourself before the task counts as reviewed.
 
+## 6b. The fast way first (the user, 2026-10-25 and 2026-11-19)
+
+The user, 2026-11-19: "when we debugging/fixing something, if we have a method to speed it, then use it ... if we found
+something can be faster for the dev or bug fix, try to find a way to do it, then use it for the debug/dev/test."
+- **Every brief names the fastest way to its scene:** the project's scene index line, its dev flags (a jump to the
+  moment, a kill or wound key, a press at a time), a sim test instead of a game run where the question is in the sim,
+  a clone for a data-only change, only the related tests. Advisors ask for clips made the same fast way.
+- **Your own showings use them too:** when the user wants an end state (a boss's death, a second form), launch
+  straight at it with the flag rather than making them wait.
+- **When a worker reports a loop that was slow, or wishes for a faster tool, offer to queue that tool.** A shortcut
+  others can reuse goes into the worker brief's flag list.
+
 ## 7. Method for visual work (the default to put in rows)
 
 Research first (web pictures and video frames of the real thing, saved as references only, never as textures). After
