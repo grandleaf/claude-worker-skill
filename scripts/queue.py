@@ -26,9 +26,19 @@ a claude session, not a global settings"): `sessions/<session id>.json` beside t
 limits (HP, MP, LP) and its own HP state. The session is CLAUDE_CODE_SESSION_ID, which Claude Code sets for every
 command a session runs (`! wts` too); `--session ID` overrides it. config.json's `hp_parallel`, `mp_parallel` and
 `lp_parallel` are only the defaults a new session starts with (HP 1, MP and LP no limit when absent); `limit` never
-writes them. A session counts as live while its Claude process (CLAUDE_PID) runs.
+writes them. A session counts as live while its Claude process (CLAUDE_PID) runs. Two Claude processes can run one
+conversation, so one session id (`claude --resume <id>` in one folder, then `claude --continue` in the folder where
+the conversation began: its newest there): the first keeps `sessions/<id>.json`, a later one writes `<id>@<pid>`
+(`<id>_<pid>.json` on disk, the name made safe).
 
-Commands (run from the project root, or pass --root):
+A session's queue is its own (the user, 2026-11-22: "the wts should be local to each session"): the one at or above
+the folder its Claude process runs in (~/.claude/sessions/<CLAUDE_PID>.json says which), as the `wts` command finds
+it. A conversation continued in another folder still remembers its old project's --root; every command but
+statusline (its root comes from the session's own folder) and awake (no queue) refuses a --root that is not this
+session's own. --other-project reads another project's tables (wts, order, window only), as an onlooker: no
+session of its own there.
+
+Commands (run from the project root, or pass --root; with neither, the nearest queue above the current folder):
   queue.py add [--pri HP|MP|LP|AG] --mode append|push|override --text "..."   file a new task (HP by default; AG
                                                           records this session as the agent's owner)
   queue.py addendum N --text "..."                        append a dated addendum to task N's Task cell
@@ -89,6 +99,65 @@ def pid_alive(pid):
         return True
     except (OSError, ValueError, TypeError):
         return False
+
+
+def find_root(p):
+    """The nearest folder at or above p whose .autopilot/worker holds a queue (as the `wts` command finds it), or None."""
+    p = os.path.abspath(p)
+    while True:
+        if os.path.isfile(os.path.join(p, ".autopilot", "worker", "queue.md")):
+            return p
+        up = os.path.dirname(p)
+        if up == p:
+            return None
+        p = up
+
+
+def _registry(pid):
+    """Claude Code's own entry for one of its processes (~/.claude/sessions/<pid>.json; never the .key files), or {}."""
+    try:
+        with open(os.path.join(os.path.expanduser("~/.claude/sessions"), f"{int(pid)}.json")) as f:
+            d = json.load(f)
+        return d if isinstance(d, dict) else {}
+    except (OSError, ValueError, TypeError):
+        return {}
+
+
+def session_home():
+    """The folder this Claude session runs in (its process's registry entry), or None outside Claude Code."""
+    pid = os.environ.get("CLAUDE_PID", "")
+    cwd = _registry(pid).get("cwd") if pid.isdigit() else None
+    return cwd if isinstance(cwd, str) and os.path.isabs(cwd) else None
+
+
+def foreign_root(root):
+    """Why `root` is not this session's queue, or "" when it is (or no Claude session can say)."""
+    home = session_home()
+    if not home:
+        return ""
+    own = find_root(home)
+    if own and os.path.realpath(own) == os.path.realpath(root):
+        return ""
+    return (f"{root} is not this session's project: this session runs in {home}, "
+            + (f"whose queue is {own}." if own else "which has no worker queue.")
+            + " A conversation resumed or continued in another folder still remembers its old project, but a session's"
+              " queue is the one at or above its own folder. Tell the user so; pass --other-project only when the user"
+              " asks for that project's table by name (wts, order and window only).")
+
+
+def own_session(q, conv):
+    """This process's name among the session files: the conversation's id, or <id>@<pid> while another live Claude
+    process on the same conversation holds the id's file, so each keeps its own limits and HP state."""
+    pid = os.environ.get("CLAUDE_PID", "")
+    if not conv or not pid.isdigit():
+        return conv
+    alt = f"{conv}@{pid}"
+    if os.path.exists(q._session_file(alt)):
+        return alt
+    other = q.read_session(conv).get("pid")
+    if isinstance(other, int) and other != int(pid) and pid_alive(other) and _registry(other).get("sessionId") == conv:
+        return alt
+    return conv
 
 
 def num_key(x):
@@ -723,8 +792,10 @@ def grid(head, body, term=False):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--root", default=os.getcwd())
+    ap.add_argument("--root", default=None, help="the project (default: the nearest queue at or above the current folder)")
     ap.add_argument("--session", default=None, help="the Claude session (default: CLAUDE_CODE_SESSION_ID)")
+    ap.add_argument("--other-project", action="store_true",
+                    help="read another project's tables (wts, order, window) when the user asks for it by name")
     sub = ap.add_subparsers(dest="cmd", required=True)
     a = sub.add_parser("add"); a.add_argument("--mode", required=True, choices=["append", "push", "override"]); a.add_argument("--text", required=True)
     a.add_argument("--pri", default="HP", choices=PRIS)
@@ -759,16 +830,25 @@ def main():
         return
     if getattr(args, "text", None):  # a table row is one line: flatten line breaks and pipes
         args.text = " ".join(args.text.replace("|", "/").split())
+    args.root = args.root or find_root(os.getcwd()) or os.getcwd()
+    if args.other_project:
+        if args.cmd not in ("wts", "order", "window"):
+            sys.exit("--other-project only reads another project's tables: wts, order, window")
+    elif args.cmd != "statusline":   # the status line finds its root from the session's own folder
+        why = foreign_root(args.root)
+        if why:
+            sys.exit(why)
     q = Queue(args.root)
-    sid = args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    conv = "" if args.other_project else args.session or os.environ.get("CLAUDE_CODE_SESSION_ID", "")
+    sid = conv if args.session else own_session(q, conv)
     q.sid = sid
 
     if args.cmd == "add":
         n, act = q.add(args.mode, args.text, args.pri)
         if args.title:
             q.set_title(n, args.title)
-        if args.pri == "AG" and sid:
-            q.set_owner(n, sid)
+        if args.pri == "AG" and conv:
+            q.set_owner(n, conv)   # the conversation's id: an agent lives in its conversation
         print(f"filed task {n} ({args.pri}, {args.mode})" + (f"; task {act['n']} paused for it" if args.mode == "override" and act else ""))
         print_order(q)
     elif args.cmd == "reviewed":

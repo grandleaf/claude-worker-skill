@@ -32,6 +32,14 @@ Files (per project; `<root>` is the project root):
 
 Run the tool as `Q() { python3 ~/.claude/skills/worker/scripts/queue.py --root <root> "$@"; }`.
 
+**`<root>` is this session's own project**: the nearest folder at or above the one this Claude session runs in that
+holds `.autopilot/worker/queue.md` (what `! wts` finds). Work it out from the session's folder, never from earlier in
+the conversation: a conversation resumed or continued in another folder still remembers its old project (2026-11-22:
+`claude --continue` in a second project picked up another project's live lead conversation, and its `wts` showed that
+project's queue). `queue.py` refuses a `--root` that is not the session's own; when it does, or `! wts` finds no
+queue, tell the user this session has no queue here. Read another project's table only when the user asks for it by
+name: `queue.py --root <that root> --other-project wts` (it reads only: wts, order, window).
+
 ## 1. Setup (first use in a project)
 
 If `<root>/.autopilot/worker/queue.md` does not exist:

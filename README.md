@@ -17,6 +17,9 @@ reviews what comes back, and shows you the result. You keep working with the lea
   running rows move to the top of their table, so the table reads in run order.
 - **A status line** with the window, the workers and the groups' modes, the plan's weekly limits (`week 24% · fable 40%`:
   the all-models week and each model's own), and `! wts` for the table at no model tokens.
+- **A session's queue is its own:** the one at or above the folder the session runs in. `queue.py` refuses another
+  project's `--root` (a conversation continued in another folder still remembers its old one); `--other-project`
+  only reads another project's table. Two processes on one conversation keep separate limits and HP state.
 - **One keep-awake per Claude session** (macOS): `queue.py awake on|off`; a session stops only its own, and its hold
   ends by itself when the session exits.
 
